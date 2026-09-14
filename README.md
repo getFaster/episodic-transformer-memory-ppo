@@ -76,6 +76,46 @@ pip install -r requirements.txt
 
 # Train a model
 
+## Episodic MoBA PPO workflow
+
+The implementation in this checkout adds the gated, pretrained Memory-Gym
+workflow described by the accompanying implementation plan. It is separate
+from the legacy upstream examples below. Use Python 3.11 and `uv`; the
+packaged commands validate strict YAML schemas and refuse PPO training unless
+the pinned pretrained checkpoint passes the baseline gate.
+
+From the repository root, run the mandatory baseline gate first:
+
+```bash
+uv sync --frozen
+uv run eval-pretrained --config configs/pretrained_eval.yaml --repo-root . --output results/baseline_reference.json
+```
+
+Then launch one of the explicitly configured three-seed arms (seed 1, 2, or
+3), supplying a writable checkpoint/output location as appropriate:
+
+```bash
+uv run train --config configs/trxl_moba_command40.yaml --repo-root .
+```
+
+Evaluate a durable checkpoint and produce descriptive routing distributions:
+
+```bash
+uv run evaluate --checkpoint /path/to/durable/checkpoint --arm trxl_moba --model-seed 1 --output results/seed1.json
+uv run analyze-retrieval --config configs/analyze_retrieval.yaml
+```
+
+The baseline gate is intentionally fail-closed. The original upstream
+`python train.py` and legacy environment examples that follow are retained as
+historical reference instructions and are not the MoBA experiment launcher.
+
+LoRA adapters use Hugging Face PEFT 0.20.0. The shipped checkpoint applies one
+shared 96x96 Q/K/V matrix to each of four heads, so the implementation loads
+those legacy weights first and then injects PEFT into zero-base logical
+384x384 delta projections. This implements a repeated block-diagonal legacy
+projection plus a dense rank-8 update, while preserving the original state-dict
+keys and the locked 73,728 trainable-parameter count.
+
 The training is launched via `train.py`. `--config` specifies the path to the yaml config file featuring hyperparameters. The `--run-id` is used to distinguish training runs. After training, the trained model will be saved to `./models/$run-id$.nn`.
 
 ```bash

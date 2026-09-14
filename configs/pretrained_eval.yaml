@@ -1,0 +1,63 @@
+schema_version: 1
+task: eval-pretrained
+arm: trxl
+provenance:
+  upstream_repo: https://github.com/MarcoMeter/episodic-transformer-memory-ppo
+  upstream_commit: acc5cb2e0cdc87bd7b5ce857d270a72a66146e0b
+  checkpoint_path: models/mortar_mayhem_grid_trxl.nn
+  checkpoint_sha256: a356543eebd1a3571fe0923c4222894f021874202ce93fb9e43da9192ffd65b5
+environment:
+  name: MortarMayhem-Grid-v0
+  command_count: 10
+  seed_start: 10000
+  seed_count: 50
+  agent_scale: 0.25
+  arena_size: 5
+  allowed_commands: 5
+  explosion_duration: 2
+  explosion_delay: 5
+  reward_command_failure: 0.0
+  reward_command_success: 0.1
+  reward_episode_success: 0.0
+transformer:
+  num_blocks: 3
+  embed_dim: 384
+  num_heads: 4
+  memory_length: 118
+  positional_encoding: relative
+  layer_norm: pre
+  gtrxl: false
+  gtrxl_bias: 0.0
+lora:
+  backend: peft
+  enabled: false
+  targets: [q, k, v, o]
+  rank: 8
+  alpha: 16
+  dropout: 0.0
+  a_init: random
+  b_init: zeros
+attention:
+  budget: 118
+  dense_recent: 118
+  search_horizon: 118
+  retrieval:
+    enabled: false
+    block_size: 16
+    retrieved_blocks: 0
+    retrieved_tokens: 0
+    score_reduction: max_head
+    tie_break: chronological_block_index
+evaluation:
+  command_count: 10
+  # Historical upstream model construction queried Memory-Gym before applying
+  # reset options, so its relative-position table used the default-delay
+  # capacity (119) while worker episodes used explosion_delay 5.
+  model_max_episode_steps: 119
+  seeds:
+    environment_start: 10000
+    environment_count: 50
+    action_rng_repeats: 2
+  minimum_success_rate: 0.95
+  minimum_mean_normalized_return: 0.95
+  output_path: results/baseline_reference.json

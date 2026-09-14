@@ -1,0 +1,7 @@
+schema_version: 1
+task: analyze-retrieval
+arm: trxl_moba
+resolved_config_path: configs/trxl_moba_command40.yaml
+routing_artifact_path: results/routing-details.csv
+output_csv: results/routing-summary.csv
+output_dir: results/retrieval-analysis

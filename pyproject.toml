@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "episodic-moba-ppo"
+version = "0.1.0"
+description = "MoBA-style long-range retrieval for pretrained episodic Transformer-XL PPO"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+license = { file = "LICENSE" }
+dependencies = [
+    "einops==0.8.1",
+    "gymnasium==0.29.0",
+    "memory-gym==1.0.2",
+    "numpy==1.26.4",
+    "peft==0.20.0",
+    "pydantic==2.11.7",
+    "PyYAML==6.0.2",
+    "ruamel.yaml==0.18.15",
+    "torch==2.9.1",
+    "wandb==0.21.3",
+]
+
+[project.scripts]
+eval-pretrained = "episodic_moba_ppo.commands.eval_pretrained:main"
+evaluate = "episodic_moba_ppo.commands.evaluate:main"
+train = "episodic_moba_ppo.commands.train:main"
+analyze-retrieval = "episodic_moba_ppo.commands.analyze_retrieval:main"
+
+[project.optional-dependencies]
+analysis = [
+    "matplotlib==3.10.6",
+    "pandas==2.3.2",
+]
+dev = [
+    "pytest==8.4.2",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

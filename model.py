@@ -68,6 +68,54 @@ class ActorCriticModel(nn.Module):
         self.value = nn.Linear(self.hidden_size, 1)
         nn.init.orthogonal_(self.value.weight, 1)
 
+    def enable_lora(self, rank=8, alpha=16, dropout=0.0):
+        """Attach zero-effect Q/K/V/O adapters after loading base weights."""
+        self.transformer.enable_lora(rank=rank, alpha=alpha, dropout=dropout)
+
+    def forward_long_history(self, obs, contexts, *, arm, attention_config):
+        """Run the actor-critic model against episode-local long history.
+
+        ``attention_config`` may be the validated Pydantic attention model or
+        its plain dictionary representation. The observation encoder and
+        actor/value heads are the same modules used by :meth:`forward`.
+        """
+        def field(config, name):
+            return config[name] if isinstance(config, dict) else getattr(config, name)
+
+        h = obs
+        if len(self.observation_space_shape) > 1:
+            batch_size = h.size()[0]
+            h = F.relu(self.conv1(h))
+            h = F.relu(self.conv2(h))
+            h = F.relu(self.conv3(h))
+            h = h.reshape((batch_size, -1))
+        h = F.relu(self.lin_hidden(h))
+
+        retrieval = field(attention_config, "retrieval")
+        transformer_output = self.transformer.forward_long_history(
+            h,
+            contexts,
+            arm=arm,
+            attention_budget=field(attention_config, "budget"),
+            dense_recent=field(attention_config, "dense_recent"),
+            search_horizon=field(attention_config, "search_horizon"),
+            block_size=field(retrieval, "block_size"),
+            retrieved_blocks=field(retrieval, "retrieved_blocks"),
+        )
+
+        h_policy = F.relu(self.lin_policy(transformer_output.hidden))
+        h_value = F.relu(self.lin_value(transformer_output.hidden))
+        value = self.value(h_value).reshape(-1)
+        policy = [
+            Categorical(logits=branch(h_policy)) for branch in self.policy_branches
+        ]
+        return (
+            policy,
+            value,
+            transformer_output.memories,
+            transformer_output.routing,
+        )
+
     def forward(self, obs:torch.tensor, memory:torch.tensor, memory_mask:torch.tensor, memory_indices:torch.tensor):
         """Forward pass of the model
 

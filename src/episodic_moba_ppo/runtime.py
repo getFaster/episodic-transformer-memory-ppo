@@ -1,0 +1,422 @@
+"""Fail-closed gates, provenance capture, and production runtime assembly."""
+
+from __future__ import annotations
+
+import json
+import math
+import platform
+import random
+import subprocess
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from importlib import metadata as package_metadata
+from pathlib import Path
+from typing import Any, Mapping
+
+import numpy as np
+import torch
+
+from episodic_moba_ppo.config import TrainConfig
+from episodic_moba_ppo.extension_gate import require_extension_gate
+
+
+class BaselineGateError(RuntimeError):
+    pass
+
+
+def runtime_metadata(
+    *,
+    repo_root: str | Path,
+    config: TrainConfig,
+    trainable_names: list[str],
+    trainable_count: int,
+) -> dict[str, Any]:
+    dependencies = {}
+    for distribution in (
+        "torch",
+        "numpy",
+        "gymnasium",
+        "memory-gym",
+        "peft",
+        "wandb",
+    ):
+        try:
+            dependencies[distribution] = package_metadata.version(distribution)
+        except package_metadata.PackageNotFoundError:
+            dependencies[distribution] = "unavailable"
+    try:
+        git_commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(repo_root),
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        git_commit = "unavailable"
+    gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
+    return {
+        "resolved_config": config.model_dump(mode="json"),
+        "git_commit": git_commit,
+        "upstream_commit": config.provenance.upstream_commit,
+        "checkpoint_sha256": config.provenance.checkpoint_sha256,
+        "dependencies": dependencies,
+        "python": platform.python_version(),
+        "gpu": gpu,
+        "cuda": torch.version.cuda,
+        "trainable_parameter_names": trainable_names,
+        "trainable_parameter_count": trainable_count,
+    }
+
+
+@dataclass(frozen=True)
+class ResumeDiscontinuity:
+    resumed_update: int
+    environments_reset: bool = True
+    episodic_memories_reset: bool = True
+    partial_work_discarded: bool = True
+    timestamp_utc: str = ""
+
+
+def require_baseline_gate(
+    path: str | Path,
+    *,
+    expected_checkpoint_sha256: str | None = None,
+    expected_source_commit: str | None = None,
+) -> dict[str, Any]:
+    gate_path = Path(path)
+    if not gate_path.is_file():
+        raise BaselineGateError(f"baseline gate artifact is missing: {gate_path}")
+    try:
+        document = json.loads(gate_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise BaselineGateError(
+            f"baseline gate artifact is invalid: {gate_path}"
+        ) from error
+    if document.get("passed") is not True:
+        raise BaselineGateError("baseline gate did not pass; training is forbidden")
+    protocol = document.get("protocol")
+    expected_protocol = {
+        "command_count": 10,
+        "model_max_episode_steps": 119,
+        "environment_seeds": [10_000, 10_049],
+        "action_repeats": 2,
+        "action_sampling": "paired_stochastic",
+        "normalized_return": (
+            "reward / (command_count * reward_command_success + "
+            "reward_episode_success)"
+        ),
+    }
+    if protocol != expected_protocol:
+        raise BaselineGateError(
+            "baseline gate protocol does not match the locked protocol"
+        )
+    summary = document.get("summary", {})
+    thresholds = document.get("thresholds", {})
+    try:
+        success_rate = float(summary["success_rate"])
+        mean_return = float(summary["mean_normalized_return"])
+        success_threshold = float(thresholds["success_rate"])
+        return_threshold = float(thresholds["mean_normalized_return"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise BaselineGateError("baseline gate is missing validated metrics") from error
+    if not all(math.isfinite(value) for value in (success_rate, mean_return)):
+        raise BaselineGateError("baseline gate metrics must be finite")
+    if success_threshold != 0.95 or return_threshold != 0.95:
+        raise BaselineGateError("baseline gate thresholds must both equal 0.95")
+    if success_rate < success_threshold or mean_return < return_threshold:
+        raise BaselineGateError(
+            "baseline metrics do not satisfy their recorded thresholds"
+        )
+    episodes = document.get("episodes")
+    if not isinstance(episodes, list) or len(episodes) != 100:
+        raise BaselineGateError("baseline gate requires exactly 100 episode records")
+    try:
+        pairs = {
+            (int(row["environment_seed"]), int(row["action_repeat"]))
+            for row in episodes
+        }
+    except (KeyError, TypeError, ValueError) as error:
+        raise BaselineGateError("baseline gate has invalid episode records") from error
+    expected_pairs = {
+        (seed, repeat) for seed in range(10_000, 10_050) for repeat in range(2)
+    }
+    if pairs != expected_pairs:
+        raise BaselineGateError("baseline gate episode coverage is incomplete")
+    provenance = document.get("provenance", {})
+    if (
+        expected_checkpoint_sha256
+        and provenance.get("checkpoint_sha256") != expected_checkpoint_sha256
+    ):
+        raise BaselineGateError(
+            "baseline checkpoint hash does not match training config"
+        )
+    if (
+        expected_source_commit
+        and provenance.get("source_commit") != expected_source_commit
+    ):
+        raise BaselineGateError("baseline source commit does not match training config")
+    return document
+
+
+def capture_rng_state() -> dict[str, Any]:
+    state: dict[str, Any] = {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch_cpu": torch.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        state["torch_cuda"] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def restore_rng_state(state: Mapping[str, Any]) -> None:
+    """Restore process RNGs; CUDA state is required only on a CUDA resume."""
+
+    try:
+        random.setstate(state["python"])
+        np.random.set_state(state["numpy"])
+        torch.set_rng_state(state["torch_cpu"])
+    except KeyError as error:
+        raise ValueError(f"checkpoint RNG state is missing {error.args[0]}") from error
+    if torch.cuda.is_available():
+        if "torch_cuda" not in state:
+            raise ValueError("CUDA resume requires saved CUDA RNG state")
+        torch.cuda.set_rng_state_all(state["torch_cuda"])
+
+
+def assemble_checkpoint_state(
+    *,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: Any,
+    completed_update: int,
+    global_step: int,
+    config: TrainConfig | Mapping[str, Any],
+    wandb_identity: Mapping[str, Any],
+    provenance: Mapping[str, Any],
+    seed_streams: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    if completed_update < 0 or global_step < 0:
+        raise ValueError("completed counters must be nonnegative")
+    if hasattr(config, "model_dump"):
+        config_data = config.model_dump(mode="json")
+    else:
+        config_data = dict(config)
+    return {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict() if scheduler is not None else None,
+        "rng": capture_rng_state(),
+        "seed_streams": dict(seed_streams or {}),
+        "counters": {
+            "completed_update": int(completed_update),
+            "global_step": int(global_step),
+        },
+        "config": config_data,
+        "wandb": dict(wandb_identity),
+        "provenance": dict(provenance),
+    }
+
+
+def resume_discontinuity(completed_update: int) -> dict[str, Any]:
+    return asdict(
+        ResumeDiscontinuity(
+            resumed_update=int(completed_update),
+            timestamp_utc=datetime.now(timezone.utc).isoformat(),
+        )
+    )
+
+
+def restore_checkpoint_state(
+    payload: Mapping[str, Any],
+    *,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: Any,
+    steps_per_update: int = 16_384,
+) -> dict[str, Any]:
+    """Restore only committed-update state and describe the mandatory reset.
+
+    Environment state and episodic traces are intentionally absent from the
+    checkpoint contract.  The caller must create fresh environments and an
+    empty :class:`TraceRegistry` before collecting another complete rollout.
+    """
+
+    try:
+        model.load_state_dict(payload["model"], strict=True)
+        optimizer.load_state_dict(payload["optimizer"])
+        scheduler_state = payload["scheduler"]
+        counters = payload["counters"]
+        rng_state = payload["rng"]
+    except KeyError as error:
+        raise ValueError(f"checkpoint payload is missing {error.args[0]}") from error
+    if scheduler is None:
+        if scheduler_state is not None:
+            raise ValueError(
+                "checkpoint has scheduler state but runtime has no scheduler"
+            )
+    elif scheduler_state is None:
+        raise ValueError("runtime scheduler requires checkpoint scheduler state")
+    else:
+        scheduler.load_state_dict(scheduler_state)
+    completed_update = int(counters["completed_update"])
+    global_step = int(counters["global_step"])
+    if completed_update < 0 or global_step != completed_update * steps_per_update:
+        raise ValueError("checkpoint counters do not describe a completed PPO update")
+    restore_rng_state(rng_state)
+    return resume_discontinuity(completed_update)
+
+
+def build_training_runtime(
+    config: TrainConfig,
+    baseline_gate_path: str | Path,
+    *,
+    repo_root: str | Path = ".",
+):
+    """Build the production 32-environment runtime after all hard gates pass."""
+
+    from episodic_moba_ppo.checkpoint import (
+        CheckpointStore,
+        load_legacy_checkpoint,
+    )
+    from episodic_moba_ppo.environment import MemoryGymEnv, mortar_reset_options
+    from episodic_moba_ppo.logging import NoOpLogger, WandbLogger
+    from episodic_moba_ppo.lora import freeze_for_lora
+    from episodic_moba_ppo.ppo import create_muon_optimizer
+    from episodic_moba_ppo.training import TrainingRuntime
+
+    root = Path(repo_root).resolve()
+    gate_path = Path(baseline_gate_path)
+    if not gate_path.is_absolute():
+        gate_path = root / gate_path
+    require_baseline_gate(
+        gate_path,
+        expected_checkpoint_sha256=config.provenance.checkpoint_sha256,
+        expected_source_commit=config.provenance.upstream_commit,
+    )
+    if config.ppo.updates == 62:
+        # The config schema requires this path for the extension stage.  The
+        # artifact itself is revalidated here, before checkpoint deserialization
+        # or environment creation, and relative paths are rooted at the repo.
+        require_extension_gate(
+            config.ppo.extension_gate_artifact,
+            repo_root=root,
+            expected_checkpoint_sha256=config.provenance.checkpoint_sha256,
+            expected_source_commit=config.provenance.upstream_commit,
+        )
+    checkpoint = config.provenance.verify_checkpoint(root)
+    if config.drive.enabled and config.drive.root == "REPLACE_ME":
+        raise ValueError("drive.root must be configured before training")
+    if config.wandb.enabled and config.wandb.entity == "REPLACE_ME":
+        raise ValueError("wandb.entity must be configured before training")
+    state_dict, legacy_config = load_legacy_checkpoint(
+        checkpoint, config.provenance.checkpoint_sha256
+    )
+    options = mortar_reset_options(
+        {
+            "agent_scale": config.environment.agent_scale,
+            "arena_size": config.environment.arena_size,
+            "allowed_commands": config.environment.allowed_commands,
+            "explosion_duration": [config.environment.explosion_duration],
+            "explosion_delay": [config.environment.explosion_delay],
+            "reward_command_failure": config.environment.reward_command_failure,
+            "reward_command_success": config.environment.reward_command_success,
+            "reward_episode_success": config.environment.reward_episode_success,
+        },
+        config.environment.command_count,
+    )
+    environments = [
+        MemoryGymEnv(config.environment.name, options)
+        for _ in range(config.ppo.workers)
+    ]
+    try:
+        from model import ActorCriticModel
+
+        # Memory-Gym computes command-count-dependent episode capacity at reset.
+        # This probe reset is explicit and does not consume the checkpointed
+        # TrainingSeedAllocator stream created later by TrainingRuntime.
+        environments[0].reset(seed=config.environment.seed_start)
+        action_space = environments[0].action_space
+        if hasattr(action_space, "n"):
+            action_shape = (int(action_space.n),)
+        elif hasattr(action_space, "nvec"):
+            action_shape = tuple(int(value) for value in action_space.nvec)
+        else:
+            raise TypeError("unsupported action space")
+        torch.manual_seed(config.seeds.model)
+        model = ActorCriticModel(
+            legacy_config,
+            environments[0].observation_space,
+            action_shape,
+            environments[0].max_episode_steps,
+        )
+        model.load_state_dict(state_dict, strict=True)
+        model.enable_lora(
+            rank=config.lora.rank,
+            alpha=config.lora.alpha,
+            dropout=config.lora.dropout,
+        )
+        trainable_names = freeze_for_lora(model, expected_count=73_728)
+        print("trainable parameters:")
+        for name in trainable_names:
+            print(f"  {name}")
+        print("trainable parameter count: 73728")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model.to(device)
+        optimizer = create_muon_optimizer(
+            list(model.named_parameters()),
+            lr=config.optimizer.initial_lr,
+            momentum=config.optimizer.momentum,
+            nesterov=config.optimizer.nesterov,
+            ns_steps=config.optimizer.ns_steps,
+            weight_decay=config.optimizer.weight_decay,
+            adjust_lr_fn=config.optimizer.adjust_lr_fn,
+        )
+        if config.wandb.enabled and config.wandb.mode != "disabled":
+            logger = WandbLogger(
+                entity=config.wandb.entity,
+                project=config.wandb.project,
+                name=config.wandb.run_name,
+                run_id=config.wandb.run_id,
+                mode=config.wandb.mode,
+                config=config.model_dump(mode="json"),
+            )
+        else:
+            logger = NoOpLogger()
+        logger.log_run_metadata(
+            runtime_metadata(
+                repo_root=root,
+                config=config,
+                trainable_names=trainable_names,
+                trainable_count=73_728,
+            )
+        )
+        local = CheckpointStore(root / config.checkpointing.local_dir)
+        drive = None
+        if config.drive.enabled:
+            drive_root = Path(config.drive.root)
+            drive = CheckpointStore(drive_root / config.checkpointing.drive_dir)
+        runtime = TrainingRuntime(
+            config=config,
+            model=model,
+            optimizer=optimizer,
+            environments=environments,
+            device=device,
+            local_checkpoints=local,
+            drive_checkpoints=drive,
+            logger=logger,
+            routing_output_path=root / config.diagnostics.output_path,
+        )
+        if config.checkpointing.resume_from:
+            resume_path = Path(config.checkpointing.resume_from)
+            if not resume_path.is_absolute():
+                resume_path = root / resume_path
+            store = CheckpointStore(resume_path.parent)
+            store.validate(resume_path)
+            payload = store.load(resume_path / "training_state.pt")
+            runtime.resume(payload)
+        return runtime
+    except Exception:
+        for environment in environments:
+            environment.close()
+        raise

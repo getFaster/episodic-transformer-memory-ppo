@@ -3,11 +3,6 @@ import torch
 
 from torch import nn
 
-from environments.cartpole_env import CartPole
-from environments.memory_gym_env import MemoryGymWrapper
-from environments.minigrid_env import Minigrid
-from environments.poc_memory_env import PocMemoryEnv
-
 def create_env(config:dict, render:bool=False):
     """Initializes an environment based on the provided environment name.
     
@@ -19,14 +14,24 @@ def create_env(config:dict, render:bool=False):
         {env}: Returns the selected environment instance.
     """
     if config["type"] == "PocMemoryEnv":
+        from environments.poc_memory_env import PocMemoryEnv
+
         return PocMemoryEnv(glob=False, freeze=True, max_episode_steps=32)
     if config["type"] == "CartPole":
+        from environments.cartpole_env import CartPole
+
         return CartPole(mask_velocity=False)
     if config["type"] == "CartPoleMasked":
+        from environments.cartpole_env import CartPole
+
         return CartPole(mask_velocity=True)
     if config["type"] == "Minigrid":
+        from environments.minigrid_env import Minigrid
+
         return Minigrid(config["name"])
     if config["type"] in ["SearingSpotlights", "MortarMayhem", "MortarMayhem-Grid", "MysteryPath", "MysteryPath-Grid"]:
+        from environments.memory_gym_env import MemoryGymWrapper
+
         return MemoryGymWrapper(env_name = config["name"], reset_params=config["reset_params"], realtime_mode=render)
 
 def polynomial_decay(initial:float, final:float, max_decay_steps:int, power:float, current_step:int) -> float:
