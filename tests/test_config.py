@@ -6,6 +6,7 @@ import yaml
 from pydantic import ValidationError
 
 from episodic_moba_ppo.config import PretrainedEvalConfig, TrainConfig, load_config
+from episodic_moba_ppo.logging import WandbLogger
 
 
 ROOT = Path(__file__).parents[1]
@@ -104,6 +105,42 @@ def test_baseline_seed_protocol_is_locked() -> None:
     raw["evaluation"]["seeds"]["action_rng_repeats"] = 3
     with pytest.raises(ValidationError, match="two paired"):
         PretrainedEvalConfig.model_validate(raw)
+
+
+def test_wandb_entity_is_optional() -> None:
+    raw = deepcopy(load_raw("trxl_command40.yaml"))
+    raw["wandb"]["entity"] = None
+    config = TrainConfig.model_validate(raw)
+    assert config.wandb.entity is None
+
+
+def test_wandb_logger_omits_empty_entity(monkeypatch) -> None:
+    import sys
+    import types
+
+    captured = {}
+
+    class DummyRun:
+        id = "run-123"
+        name = "demo-run"
+
+    def fake_init(**kwargs):
+        captured.update(kwargs)
+        return DummyRun()
+
+    monkeypatch.setitem(sys.modules, "wandb", types.SimpleNamespace(init=fake_init))
+
+    logger = WandbLogger(
+        entity=None,
+        project="proj",
+        name="demo-run",
+        run_id=None,
+        mode="online",
+        config={},
+    )
+
+    assert logger.identity["backend"] == "wandb"
+    assert "entity" not in captured or captured["entity"] is None
 
 
 def test_strict_types_do_not_coerce_seed_strings() -> None:

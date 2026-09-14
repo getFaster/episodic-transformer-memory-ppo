@@ -54,7 +54,7 @@ class WandbLogger:
     def __init__(
         self,
         *,
-        entity: str,
+        entity: str | None,
         project: str,
         name: str,
         run_id: str | None,
@@ -63,15 +63,18 @@ class WandbLogger:
     ) -> None:
         import wandb
 
-        self._run = wandb.init(
-            entity=entity,
-            project=project,
-            name=name,
-            id=run_id,
-            resume="allow" if run_id else None,
-            mode=mode,
-            config=dict(config),
-        )
+        init_kwargs: dict[str, Any] = {
+            "project": project,
+            "name": name,
+            "id": run_id,
+            "resume": "allow" if run_id else None,
+            "mode": mode,
+            "config": dict(config),
+        }
+        if entity is not None:
+            init_kwargs["entity"] = entity
+
+        self._run = wandb.init(**init_kwargs)
 
     @property
     def identity(self) -> Mapping[str, Any]:

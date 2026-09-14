@@ -307,8 +307,6 @@ def build_training_runtime(
     checkpoint = config.provenance.verify_checkpoint(root)
     if config.drive.enabled and config.drive.root == "REPLACE_ME":
         raise ValueError("drive.root must be configured before training")
-    if config.wandb.enabled and config.wandb.entity == "REPLACE_ME":
-        raise ValueError("wandb.entity must be configured before training")
     state_dict, legacy_config = load_legacy_checkpoint(
         checkpoint, config.provenance.checkpoint_sha256
     )

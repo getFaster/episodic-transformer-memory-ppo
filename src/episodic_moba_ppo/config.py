@@ -215,7 +215,7 @@ class CheckpointConfig(StrictModel):
 
 class WandbConfig(StrictModel):
     enabled: bool
-    entity: str
+    entity: str | None
     project: str
     run_name: str
     run_id: str | None
