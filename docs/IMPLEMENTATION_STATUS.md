@@ -29,7 +29,7 @@ and the historical 119-step model capacity.
   checkpoint recovery, and W&B/Drive logging seams.
 - Resume/evaluation command surfaces and W&B/Drive configuration fields.
 
-The local CPU verification suite currently passes **97 tests**. This validates
+The local CPU verification suite currently passes **99 tests**. This validates
 the implementation contracts; it is not evidence of T4 throughput or learning
 performance.
 
