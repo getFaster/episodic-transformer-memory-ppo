@@ -72,19 +72,19 @@ class ReferencePath:
     """Reference-path calibration for an adapter delay condition.
 
     ``bridge_actions`` are intentionally ignored by :class:`MiniGridTask`.
-    The first following action is the reference decision action.  Thus their
-    count is the exact cue-to-decision delay presented to the policy, without
-    depending on an undocumented MiniGrid layout coordinate.
+    The first following action is the reference decision action.  This is the
+    expected calibration for an adapter condition; the runtime separately
+    records the observed cue-to-decision gap as ``actual_delay``.
     """
 
-    delay: DelayCondition
-    cue_step: int
-    decision_step: int
+    adapter_bridge_length: DelayCondition
+    cue_timestep: int
+    decision_timestep: int
     bridge_actions: tuple[int, ...]
 
     @property
     def cue_to_decision_delay(self) -> int:
-        return self.decision_step - self.cue_step
+        return self.decision_timestep - self.cue_timestep
 
 
 @dataclass(frozen=True)
@@ -92,7 +92,9 @@ class MiniGridEpisodeRecord:
     """Environment-neutral episode result with MiniGrid provenance fields."""
 
     environment_seed: int
-    delay: int
+    adapter_bridge_length: int
+    cue_timestep: int
+    decision_timestep: int
     actual_delay: int
     backend: str
     reward: float
@@ -166,9 +168,9 @@ def reference_path(delay: DelayCondition | int) -> ReferencePath:
 
     checked = _checked_delay(delay)
     return ReferencePath(
-        delay=checked,
-        cue_step=0,
-        decision_step=int(checked),
+        adapter_bridge_length=checked,
+        cue_timestep=0,
+        decision_timestep=int(checked),
         bridge_actions=(0,) * int(checked),
     )
 
@@ -218,6 +220,8 @@ class MiniGridTask:
         self._delay: DelayCondition | None = None
         self._environment_seed: int | None = None
         self._bridge_remaining = 0
+        self._cue_timestep: int | None = None
+        self._decision_timestep: int | None = None
         self._cue_observation: np.ndarray | None = None
         self._episode_return = 0.0
         self._episode_length = 0
@@ -259,26 +263,35 @@ class MiniGridTask:
         return int(base) + max(DELAY_CONDITIONS)
 
     @property
-    def current_delay(self) -> int | None:
+    def current_adapter_bridge_length(self) -> int | None:
         return self._delay
 
     @property
     def last_episode_record(self) -> MiniGridEpisodeRecord | None:
         return self._last_record
 
-    def reset(self, *, seed: int, delay: DelayCondition | int | None = None) -> np.ndarray:
-        """Begin a deterministic episode, sampling or pinning its delay."""
+    def reset(
+        self,
+        *,
+        seed: int,
+        adapter_bridge_length: DelayCondition | int | None = None,
+    ) -> np.ndarray:
+        """Begin an episode, sampling or pinning its adapter bridge length."""
 
-        if delay is None and self._fixed_delay is not None:
+        if adapter_bridge_length is None and self._fixed_delay is not None:
             selected = self._fixed_delay
-        elif delay is None:
+        elif adapter_bridge_length is None:
             selected = self.delay_allocator.next()
         else:
-            selected = _checked_delay(delay)
+            selected = _checked_delay(adapter_bridge_length)
         observation, _ = self._env.reset(seed=int(seed))
         self._delay = selected
         self._environment_seed = int(seed)
         self._bridge_remaining = int(selected)
+        # The reset observation is the cue at logical timestep zero.  The
+        # first action forwarded to Memory-S9 is the decision action.
+        self._cue_timestep = 0
+        self._decision_timestep = None
         self._cue_observation = self._normalize_observation(observation)
         self._episode_return = 0.0
         self._episode_length = 0
@@ -299,6 +312,10 @@ class MiniGridTask:
             info["delay_phase"] = True
             return self._masked_observation(), 0.0, False, info
 
+        # Capture the observed boundary rather than copying the requested
+        # bridge length: _episode_length counts completed bridge timesteps.
+        if self._decision_timestep is None:
+            self._decision_timestep = self._episode_length
         observation, reward, terminated, truncated, raw_info = self._env.step(action)
         self._episode_length += 1
         self._episode_return += float(reward)
@@ -310,8 +327,12 @@ class MiniGridTask:
             success = _goal_success(bool(terminated), float(reward), info)
             record = MiniGridEpisodeRecord(
                 environment_seed=self._environment_seed,
-                delay=int(self._delay),
-                actual_delay=int(self._delay),
+                adapter_bridge_length=int(self._delay),
+                cue_timestep=self._required_cue_timestep(),
+                decision_timestep=self._required_decision_timestep(),
+                actual_delay=(
+                    self._required_decision_timestep() - self._required_cue_timestep()
+                ),
                 backend=self.backend,
                 reward=float(reward),
                 episodic_return=self._episode_return,
@@ -376,11 +397,27 @@ class MiniGridTask:
     def _metadata_info(self) -> dict[str, Any]:
         assert self._delay is not None
         return {
-            "delay": int(self._delay),
-            "actual_delay": int(self._delay),
+            "adapter_bridge_length": int(self._delay),
+            "cue_timestep": self._cue_timestep,
+            "decision_timestep": self._decision_timestep,
+            "actual_delay": (
+                None
+                if self._decision_timestep is None or self._cue_timestep is None
+                else self._decision_timestep - self._cue_timestep
+            ),
             "backend": self.backend,
             "environment_seed": self._environment_seed,
         }
+
+    def _required_cue_timestep(self) -> int:
+        if self._cue_timestep is None:
+            raise RuntimeError("episode has no recorded cue timestep")
+        return self._cue_timestep
+
+    def _required_decision_timestep(self) -> int:
+        if self._decision_timestep is None:
+            raise RuntimeError("episode completed before a decision action")
+        return self._decision_timestep
 
     @staticmethod
     def _normalize_observation(observation: Any) -> np.ndarray:
@@ -413,8 +450,10 @@ class MiniGridTaskFactory:
             delay_allocator=self.allocator,
         )
 
-    def for_delay(self, delay: DelayCondition | int) -> "FixedDelayMiniGridTaskFactory":
-        """Return an evaluator factory pinned to one delay condition.
+    def for_adapter_bridge_length(
+        self, adapter_bridge_length: DelayCondition | int
+    ) -> "FixedDelayMiniGridTaskFactory":
+        """Return an evaluator factory pinned to one adapter bridge length.
 
         The condition is validated here so evaluator setup fails before it
         constructs a policy or loads a checkpoint.  Environments from this
@@ -422,15 +461,17 @@ class MiniGridTaskFactory:
         training task allocator.
         """
 
-        return FixedDelayMiniGridTaskFactory(self, _checked_delay(delay))
+        return FixedDelayMiniGridTaskFactory(
+            self, _checked_delay(adapter_bridge_length)
+        )
 
 
 class FixedDelayMiniGridTaskFactory:
     """Generic factory adapter which fixes a MiniGrid evaluation axis value."""
 
-    def __init__(self, parent: MiniGridTaskFactory, delay: DelayCondition) -> None:
+    def __init__(self, parent: MiniGridTaskFactory, adapter_bridge_length: DelayCondition) -> None:
         self.parent = parent
-        self.delay = delay
+        self.adapter_bridge_length = adapter_bridge_length
 
     @property
     def allocator(self) -> DelayAllocator:
@@ -441,7 +482,7 @@ class FixedDelayMiniGridTaskFactory:
             self.parent.config,
             make_env=self.parent._make_env,
             delay_allocator=self.parent.allocator,
-            fixed_delay=self.delay,
+            fixed_delay=self.adapter_bridge_length,
         )
 
 

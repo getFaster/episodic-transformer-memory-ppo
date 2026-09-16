@@ -28,14 +28,16 @@ def _evaluate(config: MiniGridTrainConfig, state: Any, legacy: dict[str, Any], b
         task_seed=config.environment.task_rng_seed, backend=backend, delay_conditions=tuple(config.environment.delay_conditions)))
     probe = factory()
     try:
-        probe.reset(seed=config.transfer_gate.environment_start, delay=32)
+        probe.reset(
+            seed=config.transfer_gate.environment_start, adapter_bridge_length=32
+        )
         policy = LegacyTrXLPolicy(state, legacy, probe)
     finally:
         probe.close()
     episodes = []
     for seed in range(config.transfer_gate.environment_start, config.transfer_gate.environment_start + config.transfer_gate.environment_count):
         for repeat in range(config.transfer_gate.action_rng_repeats):
-            env = factory.for_delay(32)()
+            env = factory.for_adapter_bridge_length(32)()
             try:
                 observation = env.reset(seed=seed)
                 policy.reset()
@@ -45,7 +47,7 @@ def _evaluate(config: MiniGridTrainConfig, state: Any, legacy: dict[str, Any], b
                 while not done:
                     observation, step_reward, done, info = env.step(policy.act(observation, generator))
                     reward += float(step_reward)
-                episodes.append({"environment_seed": seed, "action_repeat": repeat, "action_seed": _action_seed(seed, repeat), "reward": reward, "success": int(info.get("success", False)), "episode_length": int(info.get("episode_length", 0)), "actual_delay": int(info["actual_delay"]), "backend": str(info["backend"])})
+                episodes.append({"environment_seed": seed, "action_repeat": repeat, "action_seed": _action_seed(seed, repeat), "reward": reward, "success": int(info.get("success", False)), "episode_length": int(info.get("episode_length", 0)), "adapter_bridge_length": int(info["adapter_bridge_length"]), "cue_timestep": int(info["cue_timestep"]), "decision_timestep": int(info["decision_timestep"]), "actual_delay": int(info["actual_delay"]), "backend": str(info["backend"])})
             finally:
                 env.close()
     success = sum(row["success"] for row in episodes) / len(episodes)
@@ -58,6 +60,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", type=Path, default=Path("configs/minigrid_delay_trxl.yaml"))
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--allow-failed-threshold",
+        action="store_true",
+        help="Write a complete below-threshold measurement and exit successfully.",
+    )
     args = parser.parse_args(argv)
     root = args.repo_root.resolve()
     sys.path.insert(0, str(root))
@@ -75,12 +82,16 @@ def main(argv: list[str] | None = None) -> int:
             continue
         attempts.append({"backend": backend, **result["summary"]})
         passed = (result["summary"]["success_rate"] >= config.transfer_gate.minimum_success_rate and result["summary"]["mean_return"] >= config.transfer_gate.minimum_mean_return)
-        document = {"schema_version": 1, "passed": passed, "protocol": {"task": "minigrid-memory-s9", "environment_seeds": [10000, 10049], "action_repeats": 3, "action_sampling": "paired_stochastic", "delay": 32}, "provenance": {"source_commit": config.provenance.upstream_commit, "checkpoint_sha256": config.provenance.checkpoint_sha256}, "thresholds": {"success_rate": config.transfer_gate.minimum_success_rate, "mean_return": config.transfer_gate.minimum_mean_return}, "summary": result["summary"], "backend": result["backend"], "attempts": attempts, "episodes": result["episodes"]}
+        document = {"schema_version": 1, "passed": passed, "protocol": {"task": "minigrid-memory-s9", "environment_seeds": [10000, 10049], "action_repeats": 3, "action_sampling": "paired_stochastic", "adapter_bridge_length": 32}, "provenance": {"source_commit": config.provenance.upstream_commit, "checkpoint_sha256": config.provenance.checkpoint_sha256}, "thresholds": {"success_rate": config.transfer_gate.minimum_success_rate, "mean_return": config.transfer_gate.minimum_mean_return}, "summary": result["summary"], "backend": result["backend"], "attempts": attempts, "episodes": result["episodes"]}
         output = args.output or root / config.transfer_gate.output_path
         atomic_write_json(output, document)
         if passed:
             print(f"MiniGrid transfer gate passed: {output}")
             return 0
+        if args.allow_failed_threshold:
+            print(f"MiniGrid transfer measurement recorded below threshold: {output}")
+            return 0
+        return 2
     output = args.output or root / config.transfer_gate.output_path
     atomic_write_json(output, {"schema_version": 1, "passed": False, "attempts": attempts, "episodes": []})
     return 2

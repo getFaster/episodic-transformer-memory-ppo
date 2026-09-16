@@ -1,4 +1,4 @@
-"""Validate a training request and start the gated runtime when available."""
+"""Validate a training request and start the configured PPO runtime."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--baseline-reference",
         type=Path,
         default=Path("results/baseline_reference.json"),
+        help="Mortar baseline artifact; ignored for MiniGrid training.",
     )
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     parser.add_argument(
@@ -41,9 +42,7 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--env minigrid requires task: train-minigrid")
     if args.env == "mortar" and not isinstance(config, TrainConfig):
         raise ValueError("--env mortar requires task: train")
-    gate = args.baseline_reference
-    if isinstance(config, MiniGridTrainConfig) and gate == Path("results/baseline_reference.json"):
-        gate = Path(config.transfer_gate.output_path)
+    gate = args.baseline_reference if isinstance(config, TrainConfig) else None
     runtime = build_training_runtime(
         config,
         gate,

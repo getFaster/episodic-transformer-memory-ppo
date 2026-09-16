@@ -81,8 +81,9 @@ pip install -r requirements.txt
 The implementation in this checkout adds the gated, pretrained Memory-Gym
 workflow described by the accompanying implementation plan. It is separate
 from the legacy upstream examples below. Use Python 3.11 and `uv`; the
-packaged commands validate strict YAML schemas and refuse PPO training unless
-the pinned pretrained checkpoint passes the baseline gate.
+packaged commands validate strict YAML schemas. Mortar retains its historical
+baseline gate; MiniGrid preflight measurements are optional and never block a
+full experiment launch.
 
 From the repository root, run the mandatory baseline gate first:
 
@@ -118,9 +119,32 @@ retrieval uses an attention-mass threshold of `1e-6`, recorded in the run
 metadata. During a long rollout, cumulative rollout, episode, throughput, and
 retrieval summaries are also refreshed every 2,048 environment steps.
 
-The baseline gate is intentionally fail-closed. The original upstream
+The Mortar baseline gate is intentionally fail-closed. The original upstream
 `python train.py` and legacy environment examples that follow are retained as
 historical reference instructions and are not the MoBA experiment launcher.
+
+### Optional MiniGrid transfer measurement
+
+Before a MiniGrid delay-sweep campaign, we recommend recording the untouched
+S9 checkpoint measurement. It records the complete 50-seed × 3 paired-draw
+artifact, including `adapter_bridge_length`, cue/decision timesteps, and
+`actual_delay`; it is not consumed by `train` or the three-seed launcher.
+
+```bash
+uv sync --frozen
+uv run eval-minigrid-pretrained \
+  --config configs/minigrid_delay_trxl.yaml \
+  --repo-root . \
+  --allow-failed-threshold \
+  --output results/minigrid-delay-sweep/transfer_gate.json
+```
+
+To launch MiniGrid directly, without a smoke test or transfer measurement:
+
+```bash
+DRIVE_ROOT=/path/to/experiment-output \
+  bash scripts/run_three_seeds.sh trxl --env minigrid
+```
 
 LoRA adapters use Hugging Face PEFT 0.20.0. The shipped checkpoint applies one
 shared 96x96 Q/K/V matrix to each of four heads, so the implementation loads

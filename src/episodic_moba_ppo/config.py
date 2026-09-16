@@ -285,13 +285,14 @@ class EvaluationSeeds(StrictModel):
 
 
 class MiniGridTransferGateConfig(StrictModel):
-    """Untouched-checkpoint S9 transfer gate, including backend fallback."""
+    """Untouched-checkpoint S9 transfer measurement and optional threshold gate."""
 
     environment_start: Literal[10000]
     environment_count: Literal[50]
     action_rng_repeats: Literal[3]
     minimum_success_rate: Literal[0.9]
     minimum_mean_return: Literal[0.8]
+    enforce_thresholds: bool = True
     output_path: str
 
 

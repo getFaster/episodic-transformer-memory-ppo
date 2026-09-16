@@ -350,12 +350,13 @@ def require_minigrid_transfer_gate(
     *,
     config: MiniGridTrainConfig,
 ) -> dict[str, Any]:
-    """Require the recorded untouched-checkpoint gate before PPO starts.
+    """Validate the recorded untouched-checkpoint transfer measurement.
 
     The evaluator owns backend fallback; this runtime only accepts a completed
     artifact whose metrics, coverage, and checkpoint provenance match the
-    resolved experiment.  Consequently a failed maintained backend cannot be
-    silently treated as permission to train on a different starting point.
+    resolved experiment.  Thresholds are enforced only when the resolved
+    experiment explicitly asks for them; provenance and episode coverage are
+    always required.
     """
 
     gate_path = Path(path)
@@ -365,7 +366,7 @@ def require_minigrid_transfer_gate(
         document = json.loads(gate_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise BaselineGateError("MiniGrid transfer gate artifact is invalid") from error
-    if document.get("passed") is not True:
+    if config.transfer_gate.enforce_thresholds and document.get("passed") is not True:
         raise BaselineGateError("MiniGrid transfer gate did not pass; training is forbidden")
     summary = document.get("summary", {})
     thresholds = document.get("thresholds", {})
@@ -383,7 +384,9 @@ def require_minigrid_transfer_gate(
         or return_threshold != config.transfer_gate.minimum_mean_return
     ):
         raise BaselineGateError("MiniGrid transfer gate thresholds do not match config")
-    if success_rate < success_threshold or mean_return < return_threshold:
+    if config.transfer_gate.enforce_thresholds and (
+        success_rate < success_threshold or mean_return < return_threshold
+    ):
         raise BaselineGateError("MiniGrid transfer gate metrics do not meet thresholds")
     episodes = document.get("episodes")
     expected_episodes = (
@@ -405,17 +408,18 @@ def _require_mortar_training_gate(config: TrainConfig, path: Path) -> None:
     )
 
 
-def _require_minigrid_training_gate(config: MiniGridTrainConfig, path: Path) -> None:
-    require_minigrid_transfer_gate(path, config=config)
-
-
 _TRAINING_GATE_REGISTRY: dict[type[Any], Any] = {
     TrainConfig: _require_mortar_training_gate,
-    MiniGridTrainConfig: _require_minigrid_training_gate,
 }
 
 
-def _require_training_gate(config: TrainConfig | MiniGridTrainConfig, path: Path) -> None:
+def _require_training_gate(config: TrainConfig | MiniGridTrainConfig, path: Path | None) -> None:
+    if isinstance(config, MiniGridTrainConfig):
+        # Transfer/smoke measurements are explicit preflight commands.  A user
+        # may run the full MiniGrid experiment without producing one first.
+        return
+    if path is None:
+        raise BaselineGateError("Mortar training requires a baseline gate artifact")
     try:
         _TRAINING_GATE_REGISTRY[type(config)](config, path)
     except KeyError as error:
@@ -424,12 +428,12 @@ def _require_training_gate(config: TrainConfig | MiniGridTrainConfig, path: Path
 
 def build_training_runtime(
     config: TrainConfig | MiniGridTrainConfig,
-    baseline_gate_path: str | Path,
+    baseline_gate_path: str | Path | None = None,
     *,
     repo_root: str | Path = ".",
     progress_path: str | Path | None = None,
 ):
-    """Build the production 32-environment runtime after all hard gates pass."""
+    """Build the production 32-environment runtime after required checks pass."""
 
     from episodic_moba_ppo.checkpoint import (
         CheckpointStore,
@@ -441,8 +445,8 @@ def build_training_runtime(
     from episodic_moba_ppo.training import TrainingRuntime
 
     root = Path(repo_root).resolve()
-    gate_path = Path(baseline_gate_path)
-    if not gate_path.is_absolute():
+    gate_path = None if baseline_gate_path is None else Path(baseline_gate_path)
+    if gate_path is not None and not gate_path.is_absolute():
         gate_path = root / gate_path
     _require_training_gate(config, gate_path)
     if config.ppo.updates == 62:

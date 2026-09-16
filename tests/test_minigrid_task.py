@@ -51,19 +51,19 @@ def test_reset_uses_local_rng_and_state_restores_future_condition_allocation():
     observed = []
     for environment_seed in range(4):
         task.reset(seed=environment_seed)
-        observed.append(task.current_delay)
+        observed.append(task.current_adapter_bridge_length)
     state = task.state_dict()
     expected = []
     for environment_seed in range(4, 8):
         task.reset(seed=environment_seed)
-        expected.append(task.current_delay)
+        expected.append(task.current_adapter_bridge_length)
 
     restored, _ = new_task()
     restored.load_state_dict(state)
     actual = []
     for environment_seed in range(4, 8):
         restored.reset(seed=environment_seed)
-        actual.append(restored.current_delay)
+        actual.append(restored.current_adapter_bridge_length)
 
     assert all(delay in DELAY_CONDITIONS for delay in observed)
     assert actual == expected
@@ -94,15 +94,15 @@ def test_fixed_delay_factory_works_with_generic_reset_without_consuming_allocato
     factory = MiniGridTaskFactory(
         MiniGridTaskConfig(task_seed=10), make_env=lambda *args, **kwargs: FakeMiniGrid()
     )
-    evaluator_task = factory.for_delay(96)()
+    evaluator_task = factory.for_adapter_bridge_length(96)()
     evaluator_task.reset(seed=10_000)
-    assert evaluator_task.current_delay == 96
+    assert evaluator_task.current_adapter_bridge_length == 96
     assert factory.allocator.allocations == 0
 
 
 def test_delay_bridge_is_calibrated_and_does_not_step_base_environment():
     task, raw = new_task()
-    cue = task.reset(seed=10_000, delay=32)
+    cue = task.reset(seed=10_000, adapter_bridge_length=32)
     assert cue.shape == (3, 5, 5)
     assert np.all(cue == 1.0)
     for index in range(32):
@@ -110,7 +110,10 @@ def test_delay_bridge_is_calibrated_and_does_not_step_base_environment():
         assert reward == 0.0
         assert not done
         assert info["delay_phase"] is True
-        assert info["actual_delay"] == 32
+        assert info["adapter_bridge_length"] == 32
+        assert info["actual_delay"] is None
+        assert info["cue_timestep"] == 0
+        assert info["decision_timestep"] is None
         assert np.all(observation == 0.0)
         assert raw.actions == []
     observation, reward, done, info = task.step(np.array([2]))
@@ -120,7 +123,10 @@ def test_delay_bridge_is_calibrated_and_does_not_step_base_environment():
     assert raw.actions == [2]
     assert info["delay_phase"] is False
     assert info["success"] == 1
+    assert info["adapter_bridge_length"] == 32
     assert info["actual_delay"] == 32
+    assert info["cue_timestep"] == 0
+    assert info["decision_timestep"] == 32
     assert info["backend"] == "injected"
     assert info["episode_record"]["episode_length"] == 33
 
@@ -128,7 +134,7 @@ def test_delay_bridge_is_calibrated_and_does_not_step_base_environment():
 def test_goal_label_requires_positive_terminal_reward_when_backend_has_no_label():
     task, raw = new_task()
     raw.step = lambda action: (np.zeros((5, 5, 3), dtype=np.uint8), 0.0, True, False, {})
-    task.reset(seed=2, delay=32)
+    task.reset(seed=2, adapter_bridge_length=32)
     for _ in range(32):
         task.step(0)
     _, _, done, info = task.step(0)
@@ -139,6 +145,7 @@ def test_goal_label_requires_positive_terminal_reward_when_backend_has_no_label(
 def test_reference_paths_match_every_requested_delay():
     for delay in DELAY_CONDITIONS:
         path = reference_path(delay)
+        assert path.adapter_bridge_length == delay
         assert path.cue_to_decision_delay == delay
         assert len(path.bridge_actions) == delay
     with pytest.raises(ValueError, match="32, 64, 96, or 128"):

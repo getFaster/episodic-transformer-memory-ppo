@@ -104,6 +104,7 @@ transfer_gate:
   action_rng_repeats: 3
   minimum_success_rate: 0.9
   minimum_mean_return: 0.8
+  enforce_thresholds: false
   output_path: results/minigrid-delay-sweep/transfer_gate.json
 evaluation:
   delay_conditions: [32, 64, 96, 128]

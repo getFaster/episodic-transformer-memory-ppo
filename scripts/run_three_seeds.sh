@@ -6,9 +6,12 @@ set -Eeuo pipefail
 #   DRIVE_ROOT=/content/drive/MyDrive/episodic-moba-ppo \
 #     bash scripts/run_three_seeds.sh trxl_moba
 #   DRIVE_ROOT=/content/drive/MyDrive/episodic-moba-ppo \
+#     bash scripts/run_three_seeds.sh trxl_moba --env minigrid
+#   DRIVE_ROOT=/content/drive/MyDrive/episodic-moba-ppo \
 #     bash scripts/run_three_seeds.sh trxl_moba --memory-limit 18G
 
 arm="trxl_moba"
+environment="mortar"
 memory_limit=""
 internal_seed=""
 arm_seen=0
@@ -21,6 +24,22 @@ while (($#)); do
       fi
       arm="$1"
       arm_seen=1
+      shift
+      ;;
+    --env|-env)
+      if (($# < 2)) || [[ "$2" != "mortar" && "$2" != "minigrid" ]]; then
+        echo "--env requires mortar or minigrid" >&2
+        exit 2
+      fi
+      environment="$2"
+      shift 2
+      ;;
+    --env=*|-env=*)
+      environment="${1#*=}"
+      if [[ "${environment}" != "mortar" && "${environment}" != "minigrid" ]]; then
+        echo "--env requires mortar or minigrid" >&2
+        exit 2
+      fi
       shift
       ;;
     --memory-limit)
@@ -40,7 +59,7 @@ while (($#)); do
       shift 2
       ;;
     *)
-      echo "usage: $0 [trxl|trxl_moba] [--memory-limit SIZE]" >&2
+      echo "usage: $0 [trxl|trxl_moba] [--env|-env mortar|minigrid] [--memory-limit SIZE]" >&2
       exit 2
       ;;
   esac
@@ -52,8 +71,19 @@ wandb_entity="${WANDB_ENTITY:-}"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/.." && pwd)"
 work_root="${WORK_ROOT:-/tmp/episodic-moba-ppo-runs}"
-baseline_reference="${work_root}/baseline_reference.json"
-base_config="${repo_root}/configs/${arm}_command40.yaml"
+if [[ "${environment}" == "minigrid" ]]; then
+  run_prefix="minigrid-delay-${arm}"
+  base_config="${repo_root}/configs/minigrid_delay_${arm}.yaml"
+else
+  run_prefix="${arm}-command40"
+  base_config="${repo_root}/configs/${arm}_command40.yaml"
+  gate_reference="${work_root}/baseline_reference.json"
+fi
+
+if [[ ! -f "${base_config}" ]]; then
+  echo "missing ${environment} configuration for ${arm}: ${base_config}" >&2
+  exit 2
+fi
 
 if [[ -n "${memory_limit}" && -z "${internal_seed}" && "${EPISODIC_MEMORY_GUARD_ACTIVE:-}" != "1" ]]; then
   if ! command -v systemd-run >/dev/null || ! systemctl --user show-environment >/dev/null 2>&1; then
@@ -80,7 +110,7 @@ if [[ -n "${memory_limit}" && -z "${internal_seed}" && "${EPISODIC_MEMORY_GUARD_
     --property=OOMPolicy=continue \
     --property=Delegate=yes \
     /usr/bin/env EPISODIC_MEMORY_GUARD_ACTIVE=1 \
-    bash "${script_dir}/run_three_seeds.sh" "${arm}" \
+    bash "${script_dir}/run_three_seeds.sh" "${arm}" --env "${environment}" \
       --memory-limit "${memory_limit}"
 fi
 
@@ -90,15 +120,17 @@ if [[ -z "${internal_seed}" ]]; then
 
   cd "${repo_root}"
   uv sync --frozen --python 3.11
-  uv run eval-pretrained \
-    --config configs/pretrained_eval.yaml \
-    --repo-root "${repo_root}" \
-    --output "${baseline_reference}"
+  if [[ "${environment}" == "mortar" ]]; then
+    uv run eval-pretrained \
+      --config configs/pretrained_eval.yaml \
+      --repo-root "${repo_root}" \
+      --output "${gate_reference}"
+  fi
 fi
 
 run_seed() {
   local seed="$1"
-  local run_id="${arm}-command40-seed${seed}"
+  local run_id="${run_prefix}-seed${seed}"
   local resolved_config="${work_root}/configs/${run_id}.yaml"
   local routing_csv="${DRIVE_ROOT}/analysis/${run_id}/routing-details.csv"
   local drive_run_dir="${DRIVE_ROOT}/checkpoints/${run_id}"
@@ -155,9 +187,12 @@ PY
   echo "Starting ${run_id}${resume_from:+ from ${resume_from}}"
   train_args=(
     --config "${resolved_config}"
-    --baseline-reference "${baseline_reference}"
+    --env "${environment}"
     --repo-root "${repo_root}"
   )
+  if [[ "${environment}" == "mortar" ]]; then
+    train_args+=(--baseline-reference "${gate_reference}")
+  fi
   if [[ -n "${memory_limit}" ]]; then
     train_args+=(--progress-path "${progress_path}")
   fi
@@ -169,12 +204,16 @@ PY
     exit 1
   fi
 
-  uv run evaluate \
-    --checkpoint "${checkpoint_dir}" \
-    --arm "${arm}" \
-    --model-seed "${seed}" \
-    --output "${DRIVE_ROOT}/evaluations/${run_id}.json" \
-    --repo-root "${repo_root}"
+  if [[ "${environment}" == "mortar" ]]; then
+    uv run evaluate \
+      --checkpoint "${checkpoint_dir}" \
+      --arm "${arm}" \
+      --model-seed "${seed}" \
+      --output "${DRIVE_ROOT}/evaluations/${run_id}.json" \
+      --repo-root "${repo_root}"
+  else
+    echo "MiniGrid update-31 checkpoint is durable; final delay-sweep evaluation is not implemented by the Mortar-only evaluate command."
+  fi
 
   if [[ "${arm}" == "trxl_moba" ]]; then
     analysis_config="${work_root}/configs/analyze-${run_id}.yaml"
@@ -252,8 +291,8 @@ if [[ -n "${memory_limit}" ]]; then
 fi
 
 for seed in 1 2 3; do
-  log_path="${work_root}/logs/${arm}-command40-seed${seed}.log"
-  progress_path="${work_root}/progress/${arm}-command40-seed${seed}.json"
+  log_path="${work_root}/logs/${run_prefix}-seed${seed}.log"
+  progress_path="${work_root}/progress/${run_prefix}-seed${seed}.json"
   rm -f "${progress_path}"
   echo "Launching ${arm} seed ${seed}; log: ${log_path}"
   if ((memory_guard_enabled)); then
@@ -261,8 +300,8 @@ for seed in 1 2 3; do
     mkdir "${child_cgroup}"
     echo 1 > "${child_cgroup}/memory.oom.group"
     setsid bash -c \
-      'kill -STOP "$$"; exec bash "$1" "$2" --memory-limit "$3" --run-seed "$4"' \
-      _ "${script_dir}/run_three_seeds.sh" "${arm}" "${memory_limit}" "${seed}" \
+      'kill -STOP "$$"; exec bash "$1" "$2" --env "$3" --memory-limit "$4" --run-seed "$5"' \
+      _ "${script_dir}/run_three_seeds.sh" "${arm}" "${environment}" "${memory_limit}" "${seed}" \
       > >(tee "${log_path}") 2>&1 &
     pid="$!"
     for _ in {1..100}; do
