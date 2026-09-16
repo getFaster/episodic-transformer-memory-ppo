@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import signal
-from collections.abc import Callable, Mapping, Sequence
+import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from episodic_moba_ppo.checkpoint import CheckpointStore
 from episodic_moba_ppo.diagnostics import RoutingDiagnostics
 from episodic_moba_ppo.episodic_memory import TraceRef, TraceRegistry
 from episodic_moba_ppo.logging import NoOpLogger, RunLogger
+from episodic_moba_ppo.memory_guard import ProgressReporter
 from episodic_moba_ppo.ppo import accumulate_effective_minibatch, linear_learning_rate
 from episodic_moba_ppo.runtime import (
     assemble_checkpoint_state,
@@ -24,6 +26,9 @@ from episodic_moba_ppo.runtime import (
 
 class TrainingInterrupted(RuntimeError):
     pass
+
+
+ROLLOUT_LOG_INTERVAL_ENV_STEPS = 2_048
 
 
 class TrainingSeedAllocator:
@@ -81,6 +86,16 @@ class RolloutBatch:
         return self.observations.shape[0]
 
 
+@dataclass(frozen=True)
+class UpdateDiagnostics:
+    policy_loss: float
+    value_loss: float
+    entropy: float
+    approx_kl: float
+    clip_fraction: float
+    grad_norm: float
+
+
 class TrainingRuntime:
     """A genuine, intentionally simple synchronous PPO implementation."""
 
@@ -99,6 +114,8 @@ class TrainingRuntime:
         effective_minibatch_size: int | None = None,
         microbatch_size: int | None = None,
         routing_output_path: str | Path | None = None,
+        progress_path: str | Path | None = None,
+        task_state: Any | None = None,
     ) -> None:
         if not environments:
             raise ValueError("at least one environment is required")
@@ -115,6 +132,17 @@ class TrainingRuntime:
             config.ppo.effective_minibatch_size
         )
         self.microbatch_size = microbatch_size or int(config.ppo.microbatch_size)
+        self.progress_reporter = (
+            ProgressReporter(progress_path, model_seed=config.seeds.model)
+            if progress_path is not None
+            else None
+        )
+        # A task may own stochastic condition allocation independently of the
+        # generic environment seed stream.  Keeping this as a tiny protocol
+        # (state_dict/load_state_dict) avoids environment-specific branches in
+        # PPO while making resume reproduce the allocation sequence.
+        self.task_state = task_state
+        self._checkpoint_path: Path | None = None
         self.seed_allocator = TrainingSeedAllocator(
             config.seeds.model,
             getattr(config.seeds, "environment_start", 0),
@@ -128,6 +156,8 @@ class TrainingRuntime:
         self.global_step = 0
         self._stop_requested = False
         self._observations: list[np.ndarray] = []
+        self._episode_returns: list[float] = []
+        self._episode_lengths: list[int] = []
         self._initialized = False
         diagnostics = getattr(config, "diagnostics", None)
         self.routing_diagnostics = None
@@ -149,6 +179,8 @@ class TrainingRuntime:
 
     def _initialize_environments(self) -> None:
         self._observations = []
+        self._episode_returns = [0.0 for _ in self.envs]
+        self._episode_lengths = [0 for _ in self.envs]
         self.traces = TraceRegistry(
             self.config.transformer.num_blocks, self.config.transformer.embed_dim
         )
@@ -203,6 +235,8 @@ class TrainingRuntime:
         dones = torch.zeros((workers, self.rollout_steps), dtype=torch.bool)
         references: list[list[TraceRef]] = [[] for _ in self.envs]
         records: list[dict[str, Any]] = []
+        rollout_started = time.perf_counter()
+        self._write_progress(phase="rollout", rollout_steps=0)
 
         for timestep in range(self.rollout_steps):
             if self._stop_requested:
@@ -238,11 +272,38 @@ class TrainingRuntime:
                 next_obs, reward, done, info = env.step(env_action)
                 rewards[worker, timestep] = float(reward)
                 dones[worker, timestep] = bool(done)
+                self._episode_returns[worker] += float(reward)
+                self._episode_lengths[worker] += 1
                 if done:
-                    records.append(dict(info))
+                    records.append(
+                        {
+                            **dict(info),
+                            "episodic_return": self._episode_returns[worker],
+                            "episodic_length": int(
+                                info.get("length", self._episode_lengths[worker])
+                            ),
+                            "success": float(bool(info.get("success", False))),
+                        }
+                    )
+                    self._episode_returns[worker] = 0.0
+                    self._episode_lengths[worker] = 0
                     next_obs = env.reset(seed=self.seed_allocator.next())
                     self.traces.reset_worker(worker)
                 self._observations[worker] = next_obs
+
+            collected_steps = workers * (timestep + 1)
+            if (
+                collected_steps % ROLLOUT_LOG_INTERVAL_ENV_STEPS == 0
+                and timestep + 1 < self.rollout_steps
+            ):
+                self._log_rollout_progress(
+                    records=records,
+                    collected_steps=collected_steps,
+                    rollout_started=rollout_started,
+                )
+                self._write_progress(
+                    phase="rollout", rollout_steps=collected_steps
+                )
 
         refs = [self.traces.active_trace(w).reference() for w in range(workers)]
         obs_tensor = torch.as_tensor(np.stack(self._observations), dtype=torch.float32)
@@ -279,13 +340,16 @@ class TrainingRuntime:
             episode_records=records,
         )
 
-    def _optimize_effective_minibatch(self, batch: Mapping[str, Any]) -> float:
+    def _optimize_effective_minibatch(
+        self, batch: Mapping[str, Any]
+    ) -> UpdateDiagnostics:
         clip_range = self.config.ppo.clip_range
         value_coefficient = self.config.ppo.value_loss_coefficient
         progress = self.completed_update / max(1, self.config.ppo.updates - 1)
         beta = self.config.ppo.entropy_beta_initial + progress * (
             self.config.ppo.entropy_beta_final - self.config.ppo.entropy_beta_initial
         )
+        observed: list[tuple[float, float, float, float, float]] = []
 
         def loss_fn(microbatch: Mapping[str, Any], normalized: torch.Tensor):
             policy, value, _, _ = self._forward(
@@ -313,11 +377,23 @@ class TrainingRuntime:
                 (value - returns).square(), (clipped_value - returns).square()
             ).mean()
             entropy = torch.stack([branch.entropy() for branch in policy], dim=1)
-            return (
-                -surrogate.mean()
-                + value_coefficient * value_loss
-                - beta * entropy.sum(1).mean()
+            policy_loss = -surrogate.mean()
+            entropy_mean = entropy.sum(1).mean()
+            approx_kl = ((ratio - 1) - log_ratio).mean()
+            clip_fraction = ((ratio - 1).abs() > clip_range).float().mean()
+            observed.append(
+                tuple(
+                    float(metric.detach())
+                    for metric in (
+                        policy_loss,
+                        value_loss,
+                        entropy_mean,
+                        approx_kl,
+                        clip_fraction,
+                    )
+                )
             )
+            return policy_loss + value_coefficient * value_loss - beta * entropy_mean
 
         result = accumulate_effective_minibatch(
             model=self.model,
@@ -328,12 +404,30 @@ class TrainingRuntime:
             expected_size=self.effective_minibatch_size,
             max_grad_norm=self.config.ppo.max_grad_norm,
         )
-        return result.loss
+        means = np.mean(np.asarray(observed, dtype=np.float64), axis=0)
+        return UpdateDiagnostics(
+            policy_loss=float(means[0]),
+            value_loss=float(means[1]),
+            entropy=float(means[2]),
+            approx_kl=float(means[3]),
+            clip_fraction=float(means[4]),
+            grad_norm=float(result.gradient_norm or 0.0),
+        )
 
-    def optimize_rollout(self, rollout: RolloutBatch) -> float:
+    def optimize_rollout(self, rollout: RolloutBatch) -> UpdateDiagnostics:
         if len(rollout) % self.effective_minibatch_size:
             raise ValueError("rollout must divide into complete effective minibatches")
-        losses: list[float] = []
+        diagnostics: list[UpdateDiagnostics] = []
+        total_minibatches = (
+            self.config.ppo.epochs * len(rollout) // self.effective_minibatch_size
+        )
+        completed_minibatches = 0
+        self._write_progress(
+            phase="ppo",
+            rollout_steps=len(rollout),
+            ppo_minibatches_completed=0,
+            ppo_minibatches_total=total_minibatches,
+        )
         for _ in range(self.config.ppo.epochs):
             permutation = torch.randperm(len(rollout))
             for start in range(0, len(rollout), self.effective_minibatch_size):
@@ -351,8 +445,20 @@ class TrainingRuntime:
                     "advantages": rollout.advantages[indices].to(self.device),
                     "references": [rollout.references[index] for index in selected],
                 }
-                losses.append(self._optimize_effective_minibatch(batch))
-        return float(np.mean(losses))
+                diagnostics.append(self._optimize_effective_minibatch(batch))
+                completed_minibatches += 1
+                self._write_progress(
+                    phase="ppo",
+                    rollout_steps=len(rollout),
+                    ppo_minibatches_completed=completed_minibatches,
+                    ppo_minibatches_total=total_minibatches,
+                )
+        return UpdateDiagnostics(
+            **{
+                field: float(np.mean([getattr(item, field) for item in diagnostics]))
+                for field in UpdateDiagnostics.__dataclass_fields__
+            }
+        )
 
     def _checkpoint(self) -> Path | None:
         if self.local_checkpoints is None:
@@ -366,11 +472,19 @@ class TrainingRuntime:
             config=self.config,
             wandb_identity=self.logger.identity,
             provenance=self.config.provenance.model_dump(mode="json"),
-            seed_streams={"environment": self.seed_allocator.state_dict()},
+            seed_streams={
+                "environment": self.seed_allocator.state_dict(),
+                **(
+                    {"task": self.task_state.state_dict()}
+                    if self.task_state is not None
+                    else {}
+                ),
+            },
         )
         path = self.local_checkpoints.commit(
             self.completed_update, payload, {"global_step": self.global_step}
         )
+        self._checkpoint_path = path
         milestones = set(self.config.checkpointing.milestone_updates)
         if self.drive_checkpoints is not None and (
             self.completed_update % self.config.checkpointing.every_updates == 0
@@ -378,6 +492,27 @@ class TrainingRuntime:
         ):
             self.drive_checkpoints.promote_from(path)
         return path
+
+    def _write_progress(
+        self,
+        *,
+        phase: str,
+        rollout_steps: int,
+        ppo_minibatches_completed: int = 0,
+        ppo_minibatches_total: int = 0,
+    ) -> None:
+        if self.progress_reporter is None:
+            return
+        self.progress_reporter.write(
+            completed_update=self.completed_update,
+            checkpoint_global_step=self.global_step,
+            checkpoint_path=self._checkpoint_path,
+            phase=phase,
+            rollout_steps=rollout_steps,
+            rollout_total=len(self.envs) * self.rollout_steps,
+            ppo_minibatches_completed=ppo_minibatches_completed,
+            ppo_minibatches_total=ppo_minibatches_total,
+        )
 
     def resume(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         discontinuity = restore_checkpoint_state(
@@ -390,6 +525,11 @@ class TrainingRuntime:
         self.completed_update = int(counters["completed_update"])
         self.global_step = int(counters["global_step"])
         self.seed_allocator.load_state_dict(payload["seed_streams"]["environment"])
+        if self.task_state is not None:
+            try:
+                self.task_state.load_state_dict(payload["seed_streams"]["task"])
+            except KeyError as error:
+                raise ValueError("checkpoint is missing MiniGrid task RNG state") from error
         self._initialize_environments()
         self.logger.log({"resume/discontinuity": 1}, step=self.global_step)
         self.logger.log_records(
@@ -397,10 +537,72 @@ class TrainingRuntime:
         )
         return discontinuity
 
-    def _flush_diagnostics(self) -> dict[str, float]:
+    @staticmethod
+    def _empty_moba_metrics() -> dict[str, float]:
+        return {
+            "moba/selected_distance_mean": 0.0,
+            "moba/selected_distance_p90": 0.0,
+            "moba/fraction_beyond_recent_window": 0.0,
+            "moba/selection_entropy": 0.0,
+            "moba/unique_blocks_selected": 0.0,
+            "moba/retrieved_attention_mass": 0.0,
+            "moba/useful_retrieval_rate": 0.0,
+        }
+
+    def _routing_metric_snapshot(self) -> dict[str, float]:
         if self.routing_diagnostics is None:
-            return {}
-        metrics = self.routing_diagnostics.metrics(reset=True)
+            return self._empty_moba_metrics()
+        metrics = self.routing_diagnostics.metrics()
+        metrics.update(
+            self.routing_diagnostics.moba_metrics(
+                dense_recent=int(self.config.attention.dense_recent)
+            ).values
+        )
+        return metrics
+
+    def _log_rollout_progress(
+        self,
+        *,
+        records: Sequence[Mapping[str, Any]],
+        collected_steps: int,
+        rollout_started: float,
+    ) -> None:
+        elapsed = time.perf_counter() - rollout_started
+        pending_step = self.global_step + collected_steps
+        values: dict[str, float | int] = {
+            "charts/global_step": pending_step,
+            "perf/env_steps_per_sec": collected_steps / max(elapsed, 1e-12),
+            "perf/rollout_time_sec": elapsed,
+            "perf/rollout_progress_fraction": collected_steps
+            / (len(self.envs) * self.rollout_steps),
+            **self._routing_metric_snapshot(),
+        }
+        if records:
+            values.update(
+                {
+                    "charts/episodic_return": float(
+                        np.mean([record["episodic_return"] for record in records])
+                    ),
+                    "charts/episodic_length": float(
+                        np.mean([record["episodic_length"] for record in records])
+                    ),
+                    "charts/success_rate": float(
+                        np.mean([record["success"] for record in records])
+                    ),
+                }
+            )
+        self.logger.log(values, step=pending_step)
+
+    def _flush_diagnostics(
+        self, *, update: int | None = None
+    ) -> tuple[dict[str, float], list[float]]:
+        if self.routing_diagnostics is None:
+            return self._empty_moba_metrics(), []
+        metrics = self.routing_diagnostics.metrics()
+        moba = self.routing_diagnostics.moba_metrics(
+            dense_recent=int(self.config.attention.dense_recent), reset=True
+        )
+        metrics.update(moba.values)
         written = self.routing_diagnostics.write_details(self.routing_output_path)
         if written is not None:
             self.logger.log_artifact(
@@ -409,13 +611,38 @@ class TrainingRuntime:
                 metadata={
                     "arm": self.config.arm,
                     "model_seed": self.config.seeds.model,
-                    "update": self.completed_update,
+                    "update": int(update or self.completed_update),
                     "sample_rate": (
                         self.config.diagnostics.detailed_routing_sample_rate
                     ),
                 },
             )
-        return metrics
+        return metrics, list(moba.retrieval_distances)
+
+    def _synchronize_device(self) -> None:
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+
+    def _lora_snapshot(self) -> list[torch.Tensor]:
+        return [
+            parameter.detach().clone()
+            for parameter in self.model.parameters()
+            if parameter.requires_grad
+        ]
+
+    def _parameter_delta_norm(self, before: Sequence[torch.Tensor]) -> float:
+        after = [
+            parameter.detach()
+            for parameter in self.model.parameters()
+            if parameter.requires_grad
+        ]
+        if len(before) != len(after):
+            raise AssertionError("trainable parameter set changed during PPO update")
+        squared = sum(
+            float((current - previous).float().square().sum())
+            for previous, current in zip(before, after, strict=True)
+        )
+        return squared**0.5
 
     def request_stop(self, *_: Any) -> None:
         self._stop_requested = True
@@ -441,32 +668,101 @@ class TrainingRuntime:
         try:
             while self.completed_update < target:
                 self.scheduler.step_to(self.completed_update)
+                if self.device.type == "cuda":
+                    torch.cuda.reset_peak_memory_stats(self.device)
+                self._synchronize_device()
+                update_started = time.perf_counter()
                 rollout = self.collect_rollout()
-                loss = self.optimize_rollout(rollout)
-                self.completed_update += 1
-                self.global_step += len(self.envs) * self.rollout_steps
-                self._checkpoint()
-                routing_metrics = self._flush_diagnostics()
+                self._synchronize_device()
+                rollout_finished = time.perf_counter()
+                pending_global_step = (
+                    self.global_step + len(self.envs) * self.rollout_steps
+                )
+                pending_update = self.completed_update + 1
+                routing_metrics, retrieval_distances = self._flush_diagnostics(
+                    update=pending_update
+                )
                 episode_records = [
                     {
                         **record,
                         "arm": self.config.arm,
                         "model_seed": self.config.seeds.model,
-                        "update": self.completed_update,
+                        "update": pending_update,
                     }
                     for record in rollout.episode_records
                 ]
                 self.logger.log_records(
-                    "episodes/records", episode_records, step=self.global_step
+                    "episodes/records", episode_records, step=pending_global_step
                 )
+                if pending_update % 5 == 0:
+                    log_histogram = getattr(self.logger, "log_histogram", None)
+                    if callable(log_histogram):
+                        log_histogram(
+                            "moba/retrieval_distance_histogram",
+                            retrieval_distances,
+                            step=pending_global_step,
+                        )
+                returns = [float(record["episodic_return"]) for record in episode_records]
+                lengths = [float(record["episodic_length"]) for record in episode_records]
+                successes = [float(record["success"]) for record in episode_records]
+                return_targets = rollout.values + rollout.advantages
+                target_variance = float(torch.var(return_targets, correction=0))
+                explained_variance = (
+                    1.0
+                    - float(torch.var(return_targets - rollout.values, correction=0))
+                    / target_variance
+                    if target_variance > 0.0
+                    else 0.0
+                )
+                rollout_time = rollout_finished - update_started
                 self.logger.log(
                     {
-                        "ppo/loss": loss,
+                        "charts/episodic_return": float(np.mean(returns)) if returns else 0.0,
+                        "charts/episodic_length": float(np.mean(lengths)) if lengths else 0.0,
+                        "charts/success_rate": float(np.mean(successes)) if successes else 0.0,
+                        "charts/global_step": pending_global_step,
+                        "losses/explained_variance": explained_variance,
+                        "perf/env_steps_per_sec": (
+                            len(self.envs)
+                            * self.rollout_steps
+                            / max(rollout_time, 1e-12)
+                        ),
+                        "perf/rollout_time_sec": rollout_time,
+                        **routing_metrics,
+                    },
+                    step=pending_global_step,
+                )
+                parameters_before = self._lora_snapshot()
+                losses = self.optimize_rollout(rollout)
+                self._synchronize_device()
+                update_finished = time.perf_counter()
+                self.completed_update += 1
+                self.global_step = pending_global_step
+                self._checkpoint()
+                self._write_progress(phase="checkpoint", rollout_steps=0)
+                update_time = update_finished - rollout_finished
+                self.logger.log(
+                    {
+                        "charts/global_step": self.global_step,
+                        "losses/policy_loss": losses.policy_loss,
+                        "losses/value_loss": losses.value_loss,
+                        "losses/entropy": losses.entropy,
+                        "losses/approx_kl": losses.approx_kl,
+                        "losses/clip_fraction": losses.clip_fraction,
+                        "lora/grad_norm": losses.grad_norm,
+                        "lora/parameter_delta_norm": self._parameter_delta_norm(
+                            parameters_before
+                        ),
+                        "perf/update_time_sec": update_time,
+                        "perf/gpu_memory_peak_mb": (
+                            torch.cuda.max_memory_allocated(self.device) / 1024**2
+                            if self.device.type == "cuda"
+                            else 0.0
+                        ),
                         "ppo/learning_rate": self.optimizer.param_groups[0]["lr"],
                         "ppo/value_mean": float(rollout.values.mean()),
                         "ppo/advantage_mean": float(rollout.advantages.mean()),
-                        "episodes": len(rollout.episode_records),
-                        **routing_metrics,
+                        "episodes": len(episode_records),
                     },
                     step=self.global_step,
                 )

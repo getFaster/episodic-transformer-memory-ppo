@@ -63,13 +63,18 @@ def test_model_enable_lora_supports_exact_full_model_freezing_contract():
     model = _model()
     original_keys = set(model.state_dict())
     model.enable_lora(rank=8, alpha=16, dropout=0.0)
-    trainable = freeze_for_lora(model, expected_count=73_728)
+    trainable = freeze_for_lora(model)
 
-    assert len(trainable) == 24
-    assert all("_lora.lora_" in name for name in trainable)
+    assert len(trainable) > 24
+    assert any("_lora.lora_" in name for name in trainable)
+    assert any(name.startswith("lin_policy.") for name in trainable)
+    assert any(name.startswith("policy_branches.") for name in trainable)
+    assert any(name.startswith("lin_value.") for name in trainable)
+    assert any(name.startswith("value.") for name in trainable)
     assert not any("lora" in name for name in original_keys)
     assert all(
-        parameter.requires_grad == ("_lora.lora_" in name)
+        parameter.requires_grad
+        == ("_lora.lora_" in name or name.startswith(("lin_policy.", "policy_branches.", "lin_value.", "value.")))
         for name, parameter in model.named_parameters()
     )
 

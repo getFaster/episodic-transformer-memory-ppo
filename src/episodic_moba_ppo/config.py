@@ -54,6 +54,12 @@ class ProvenanceConfig(StrictModel):
 
 
 class EnvironmentConfig(StrictModel):
+    """Historical Mortar Mayhem environment contract.
+
+    This model is deliberately kept separate from :class:`MiniGridEnvironmentConfig`.
+    Existing Mortar YAML documents remain both valid and semantically unchanged.
+    """
+
     name: Literal["MortarMayhem-Grid-v0"]
     command_count: Annotated[int, Field(ge=1)]
     seed_start: Annotated[int, Field(ge=0)]
@@ -75,6 +81,38 @@ class TransformerConfig(StrictModel):
     memory_length: Literal[118]
     positional_encoding: Literal["relative"]
     layer_norm: Literal["pre"]
+    gtrxl: Literal[False]
+    gtrxl_bias: Literal[0.0]
+
+
+class MiniGridEnvironmentConfig(StrictModel):
+    """Locked MiniGrid Memory S9 delay-sweep task specification."""
+
+    name: Literal["MiniGrid-MemoryS9-v0"]
+    scenario: Literal["S9"]
+    backend: Literal["minigrid==3.1.0"]
+    legacy_fallback_backend: Literal["gym-minigrid==1.0.2"]
+    delay_conditions: list[Literal[32, 64, 96, 128]]
+    task_rng_seed: Annotated[int, Field(ge=0)]
+    seed_start: Annotated[int, Field(ge=0)]
+    seed_count: Annotated[int, Field(ge=1)]
+
+    @model_validator(mode="after")
+    def validate_delay_sweep(self) -> "MiniGridEnvironmentConfig":
+        if self.delay_conditions != [32, 64, 96, 128]:
+            raise ValueError("MiniGrid delay_conditions must be [32, 64, 96, 128]")
+        return self
+
+
+class MiniGridTransformerConfig(StrictModel):
+    """The exact architecture serialized in models/minigrid.nn."""
+
+    num_blocks: Literal[3]
+    embed_dim: Literal[384]
+    num_heads: Literal[4]
+    memory_length: Literal[64]
+    positional_encoding: Literal["relative"]
+    layer_norm: Literal["post"]
     gtrxl: Literal[False]
     gtrxl_bias: Literal[0.0]
 
@@ -246,6 +284,39 @@ class EvaluationSeeds(StrictModel):
     action_rng_repeats: Literal[2, 3]
 
 
+class MiniGridTransferGateConfig(StrictModel):
+    """Untouched-checkpoint S9 transfer gate, including backend fallback."""
+
+    environment_start: Literal[10000]
+    environment_count: Literal[50]
+    action_rng_repeats: Literal[3]
+    minimum_success_rate: Literal[0.9]
+    minimum_mean_return: Literal[0.8]
+    output_path: str
+
+
+class MiniGridEvaluationProtocol(StrictModel):
+    """Fixed final-only, per-delay evaluation protocol."""
+
+    delay_conditions: list[Literal[32, 64, 96, 128]]
+    seeds: EvaluationSeeds
+    checkpoint_update: Literal[31]
+    output_path: str
+    summary_path: str
+
+    @model_validator(mode="after")
+    def validate_delay_sweep(self) -> "MiniGridEvaluationProtocol":
+        if self.delay_conditions != [32, 64, 96, 128]:
+            raise ValueError("MiniGrid evaluation delays must be [32, 64, 96, 128]")
+        if self.seeds.action_rng_repeats != 3:
+            raise ValueError("MiniGrid final evaluation requires three paired action-RNG repeats")
+        return self
+
+
+class MiniGridWandbConfig(WandbConfig):
+    group: Literal["minigrid-delay-sweep"]
+
+
 class TrainConfig(StrictModel):
     schema_version: Literal[1]
     task: Literal["train"]
@@ -300,6 +371,75 @@ class TrainConfig(StrictModel):
         terminal_update = self.ppo.updates
         if terminal_update not in self.checkpointing.milestone_updates:
             raise ValueError("checkpoint milestones must include the terminal PPO update")
+        return self
+
+
+class MiniGridTrainConfig(StrictModel):
+    """Typed, final-only MiniGrid delay-sweep training experiment.
+
+    It intentionally does not inherit from ``TrainConfig``: Mortar's 118-token,
+    pre-layer-norm and command-count constraints are historical contracts rather
+    than defaults for a different pretrained checkpoint.
+    """
+
+    schema_version: Literal[1]
+    task: Literal["train-minigrid"]
+    arm: Arm
+    provenance: ProvenanceConfig
+    environment: MiniGridEnvironmentConfig
+    transformer: MiniGridTransformerConfig
+    lora: LoraConfig
+    attention: AttentionConfig
+    ppo: PPOConfig
+    optimizer: MuonConfig
+    diagnostics: DiagnosticsConfig
+    checkpointing: CheckpointConfig
+    seeds: TrainSeeds
+    wandb: MiniGridWandbConfig
+    drive: DriveConfig
+    transfer_gate: MiniGridTransferGateConfig
+    evaluation: MiniGridEvaluationProtocol
+
+    @model_validator(mode="after")
+    def validate_experimental_contract(self) -> "MiniGridTrainConfig":
+        if self.provenance.checkpoint_path != "models/minigrid.nn":
+            raise ValueError("MiniGrid must start from models/minigrid.nn")
+        if self.provenance.checkpoint_sha256 != (
+            "11065c3fb00abe08555ff4ddb436285cf3351920b5ad1ba8978e071f00dc1375"
+        ):
+            raise ValueError("MiniGrid config must use the pinned minigrid checkpoint SHA-256")
+        if self.ppo.updates != 31 or self.ppo.environment_steps != 507_904:
+            raise ValueError("MiniGrid delay sweep is locked to update 31 / 507,904 steps")
+        if self.environment.seed_start != self.seeds.environment_start:
+            raise ValueError("environment seed_start must match seeds.environment_start")
+        if self.environment.seed_count != self.seeds.environment_count:
+            raise ValueError("environment seed_count must match seeds.environment_count")
+        if not self.lora.enabled:
+            raise ValueError("LoRA must be enabled for MiniGrid PPO fine-tuning")
+        if self.arm == "trxl":
+            if self.attention.retrieval.enabled:
+                raise ValueError("trxl must disable retrieval")
+            if self.attention.dense_recent != self.attention.budget:
+                raise ValueError("trxl dense_recent must equal its attention budget")
+            if self.attention.retrieval.retrieved_blocks != 0:
+                raise ValueError("trxl must retrieve zero blocks")
+        else:
+            if not self.attention.retrieval.enabled:
+                raise ValueError("trxl_moba must enable retrieval")
+            if self.attention.budget != 256 or self.attention.dense_recent != 128:
+                raise ValueError("trxl_moba requires budget 256 and dense_recent 128")
+            if self.attention.retrieval.block_size != 16:
+                raise ValueError("trxl_moba requires block_size 16")
+            if self.attention.retrieval.retrieved_blocks != 8:
+                raise ValueError("trxl_moba requires eight retrieved blocks")
+            if self.attention.search_horizon != 2560:
+                raise ValueError("trxl_moba requires search_horizon 2560")
+        if self.attention.budget != 256:
+            raise ValueError("both MiniGrid arms require an attention budget of 256")
+        if self.ppo.updates not in self.checkpointing.milestone_updates:
+            raise ValueError("checkpoint milestones must include update 31")
+        if self.evaluation.checkpoint_update not in self.checkpointing.milestone_updates:
+            raise ValueError("final MiniGrid evaluation must select a checkpointed update")
         return self
 
 
@@ -384,7 +524,13 @@ class AnalyzeRetrievalConfig(StrictModel):
 
 
 RunConfig: TypeAlias = Annotated[
-    TrainConfig | EvaluateConfig | PretrainedEvalConfig | AnalyzeRetrievalConfig,
+    (
+        TrainConfig
+        | MiniGridTrainConfig
+        | EvaluateConfig
+        | PretrainedEvalConfig
+        | AnalyzeRetrievalConfig
+    ),
     Field(discriminator="task"),
 ]
 _RUN_CONFIG_ADAPTER = TypeAdapter(RunConfig)

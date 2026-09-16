@@ -16,8 +16,9 @@ from typing import Any, Mapping
 import numpy as np
 import torch
 
-from episodic_moba_ppo.config import TrainConfig
+from episodic_moba_ppo.config import MiniGridTrainConfig, TrainConfig
 from episodic_moba_ppo.extension_gate import require_extension_gate
+from episodic_moba_ppo.moba_retrieval import USEFUL_ATTENTION_THRESHOLD
 
 
 class BaselineGateError(RuntimeError):
@@ -27,7 +28,7 @@ class BaselineGateError(RuntimeError):
 def runtime_metadata(
     *,
     repo_root: str | Path,
-    config: TrainConfig,
+    config: TrainConfig | MiniGridTrainConfig,
     trainable_names: list[str],
     trainable_count: int,
 ) -> dict[str, Any]:
@@ -65,6 +66,17 @@ def runtime_metadata(
         "cuda": torch.version.cuda,
         "trainable_parameter_names": trainable_names,
         "trainable_parameter_count": trainable_count,
+        "logging_definitions": {
+            "fraction_beyond_recent_window": (
+                "selected block distance > attention.dense_recent"
+            ),
+            "retrieved_attention_mass": (
+                "mean attention mass on retrieved tokens across heads and layers"
+            ),
+            "useful_retrieval_attention_threshold": USEFUL_ATTENTION_THRESHOLD,
+            "retrieval_distance_histogram_every_updates": 5,
+            "rollout_log_interval_environment_steps": 2_048,
+        },
     }
 
 
@@ -267,11 +279,155 @@ def restore_checkpoint_state(
     return resume_discontinuity(completed_update)
 
 
+@dataclass(frozen=True)
+class TrainingTaskAssembly:
+    """Environment factory plus optional checkpointable task-local state."""
+
+    factory: Any
+    task_state: Any | None = None
+
+
+def _mortar_task_factory(config: TrainConfig) -> TrainingTaskAssembly:
+    """Retain the historical Mortar adapter behind the task-factory boundary."""
+
+    from episodic_moba_ppo.environment import MemoryGymEnv, mortar_reset_options
+
+    options = mortar_reset_options(
+        {
+            "agent_scale": config.environment.agent_scale,
+            "arena_size": config.environment.arena_size,
+            "allowed_commands": config.environment.allowed_commands,
+            "explosion_duration": [config.environment.explosion_duration],
+            "explosion_delay": [config.environment.explosion_delay],
+            "reward_command_failure": config.environment.reward_command_failure,
+            "reward_command_success": config.environment.reward_command_success,
+            "reward_episode_success": config.environment.reward_episode_success,
+        },
+        config.environment.command_count,
+    )
+    return TrainingTaskAssembly(
+        factory=lambda: MemoryGymEnv(config.environment.name, options)
+    )
+
+
+def _minigrid_task_factory(config: MiniGridTrainConfig) -> TrainingTaskAssembly:
+    """Resolve all MiniGrid details at the task boundary, not in PPO."""
+
+    from episodic_moba_ppo.minigrid_task import MiniGridTaskConfig, MiniGridTaskFactory
+
+    backend = {
+        "minigrid==3.1.0": "minigrid",
+        "gym-minigrid==1.0.2": "gym_minigrid",
+    }[config.environment.backend]
+    factory = MiniGridTaskFactory(
+        MiniGridTaskConfig(
+            task_seed=config.environment.task_rng_seed,
+            backend=backend,
+            environment_id=config.environment.name,
+            delay_conditions=tuple(config.environment.delay_conditions),
+        )
+    )
+    return TrainingTaskAssembly(factory=factory, task_state=factory.allocator)
+
+
+_TASK_FACTORY_REGISTRY: dict[type[Any], Any] = {
+    TrainConfig: _mortar_task_factory,
+    MiniGridTrainConfig: _minigrid_task_factory,
+}
+
+
+def _resolve_training_task(
+    config: TrainConfig | MiniGridTrainConfig,
+) -> TrainingTaskAssembly:
+    try:
+        return _TASK_FACTORY_REGISTRY[type(config)](config)
+    except KeyError as error:
+        raise TypeError(f"no task factory is registered for {type(config).__name__}") from error
+
+
+def require_minigrid_transfer_gate(
+    path: str | Path,
+    *,
+    config: MiniGridTrainConfig,
+) -> dict[str, Any]:
+    """Require the recorded untouched-checkpoint gate before PPO starts.
+
+    The evaluator owns backend fallback; this runtime only accepts a completed
+    artifact whose metrics, coverage, and checkpoint provenance match the
+    resolved experiment.  Consequently a failed maintained backend cannot be
+    silently treated as permission to train on a different starting point.
+    """
+
+    gate_path = Path(path)
+    if not gate_path.is_file():
+        raise BaselineGateError(f"MiniGrid transfer gate artifact is missing: {gate_path}")
+    try:
+        document = json.loads(gate_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise BaselineGateError("MiniGrid transfer gate artifact is invalid") from error
+    if document.get("passed") is not True:
+        raise BaselineGateError("MiniGrid transfer gate did not pass; training is forbidden")
+    summary = document.get("summary", {})
+    thresholds = document.get("thresholds", {})
+    try:
+        success_rate = float(summary["success_rate"])
+        mean_return = float(summary["mean_return"])
+        success_threshold = float(thresholds["success_rate"])
+        return_threshold = float(thresholds["mean_return"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise BaselineGateError("MiniGrid transfer gate is missing validated metrics") from error
+    if not all(math.isfinite(value) for value in (success_rate, mean_return)):
+        raise BaselineGateError("MiniGrid transfer gate metrics must be finite")
+    if (
+        success_threshold != config.transfer_gate.minimum_success_rate
+        or return_threshold != config.transfer_gate.minimum_mean_return
+    ):
+        raise BaselineGateError("MiniGrid transfer gate thresholds do not match config")
+    if success_rate < success_threshold or mean_return < return_threshold:
+        raise BaselineGateError("MiniGrid transfer gate metrics do not meet thresholds")
+    episodes = document.get("episodes")
+    expected_episodes = (
+        config.transfer_gate.environment_count * config.transfer_gate.action_rng_repeats
+    )
+    if not isinstance(episodes, list) or len(episodes) != expected_episodes:
+        raise BaselineGateError("MiniGrid transfer gate has incomplete episode records")
+    provenance = document.get("provenance", {})
+    if provenance.get("checkpoint_sha256") != config.provenance.checkpoint_sha256:
+        raise BaselineGateError("MiniGrid transfer gate checkpoint hash does not match config")
+    return document
+
+
+def _require_mortar_training_gate(config: TrainConfig, path: Path) -> None:
+    require_baseline_gate(
+        path,
+        expected_checkpoint_sha256=config.provenance.checkpoint_sha256,
+        expected_source_commit=config.provenance.upstream_commit,
+    )
+
+
+def _require_minigrid_training_gate(config: MiniGridTrainConfig, path: Path) -> None:
+    require_minigrid_transfer_gate(path, config=config)
+
+
+_TRAINING_GATE_REGISTRY: dict[type[Any], Any] = {
+    TrainConfig: _require_mortar_training_gate,
+    MiniGridTrainConfig: _require_minigrid_training_gate,
+}
+
+
+def _require_training_gate(config: TrainConfig | MiniGridTrainConfig, path: Path) -> None:
+    try:
+        _TRAINING_GATE_REGISTRY[type(config)](config, path)
+    except KeyError as error:
+        raise TypeError(f"no baseline gate is registered for {type(config).__name__}") from error
+
+
 def build_training_runtime(
-    config: TrainConfig,
+    config: TrainConfig | MiniGridTrainConfig,
     baseline_gate_path: str | Path,
     *,
     repo_root: str | Path = ".",
+    progress_path: str | Path | None = None,
 ):
     """Build the production 32-environment runtime after all hard gates pass."""
 
@@ -279,7 +435,6 @@ def build_training_runtime(
         CheckpointStore,
         load_legacy_checkpoint,
     )
-    from episodic_moba_ppo.environment import MemoryGymEnv, mortar_reset_options
     from episodic_moba_ppo.logging import NoOpLogger, WandbLogger
     from episodic_moba_ppo.lora import freeze_for_lora
     from episodic_moba_ppo.ppo import create_muon_optimizer
@@ -289,11 +444,7 @@ def build_training_runtime(
     gate_path = Path(baseline_gate_path)
     if not gate_path.is_absolute():
         gate_path = root / gate_path
-    require_baseline_gate(
-        gate_path,
-        expected_checkpoint_sha256=config.provenance.checkpoint_sha256,
-        expected_source_commit=config.provenance.upstream_commit,
-    )
+    _require_training_gate(config, gate_path)
     if config.ppo.updates == 62:
         # The config schema requires this path for the extension stage.  The
         # artifact itself is revalidated here, before checkpoint deserialization
@@ -310,23 +461,8 @@ def build_training_runtime(
     state_dict, legacy_config = load_legacy_checkpoint(
         checkpoint, config.provenance.checkpoint_sha256
     )
-    options = mortar_reset_options(
-        {
-            "agent_scale": config.environment.agent_scale,
-            "arena_size": config.environment.arena_size,
-            "allowed_commands": config.environment.allowed_commands,
-            "explosion_duration": [config.environment.explosion_duration],
-            "explosion_delay": [config.environment.explosion_delay],
-            "reward_command_failure": config.environment.reward_command_failure,
-            "reward_command_success": config.environment.reward_command_success,
-            "reward_episode_success": config.environment.reward_episode_success,
-        },
-        config.environment.command_count,
-    )
-    environments = [
-        MemoryGymEnv(config.environment.name, options)
-        for _ in range(config.ppo.workers)
-    ]
+    task_assembly = _resolve_training_task(config)
+    environments = [task_assembly.factory() for _ in range(config.ppo.workers)]
     try:
         from model import ActorCriticModel
 
@@ -354,11 +490,17 @@ def build_training_runtime(
             alpha=config.lora.alpha,
             dropout=config.lora.dropout,
         )
-        trainable_names = freeze_for_lora(model, expected_count=73_728)
+        # Policy cardinality differs between Mortar and MiniGrid.  The frozen
+        # set is verified by ``freeze_for_lora``; derive its size from the
+        # instantiated model instead of retaining Mortar's old 73,728 constant.
+        trainable_names = freeze_for_lora(model)
+        trainable_count = sum(
+            parameter.numel() for parameter in model.parameters() if parameter.requires_grad
+        )
         print("trainable parameters:")
         for name in trainable_names:
             print(f"  {name}")
-        print("trainable parameter count: 73728")
+        print(f"trainable parameter count: {trainable_count}")
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model.to(device)
         optimizer = create_muon_optimizer(
@@ -386,7 +528,7 @@ def build_training_runtime(
                 repo_root=root,
                 config=config,
                 trainable_names=trainable_names,
-                trainable_count=73_728,
+                trainable_count=trainable_count,
             )
         )
         local = CheckpointStore(root / config.checkpointing.local_dir)
@@ -404,6 +546,8 @@ def build_training_runtime(
             drive_checkpoints=drive,
             logger=logger,
             routing_output_path=root / config.diagnostics.output_path,
+            progress_path=progress_path,
+            task_state=task_assembly.task_state,
         )
         if config.checkpointing.resume_from:
             resume_path = Path(config.checkpointing.resume_from)

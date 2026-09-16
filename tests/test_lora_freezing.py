@@ -1,6 +1,12 @@
 import torch
 
-from episodic_moba_ppo.lora import assert_lora_trainable_set, freeze_for_lora
+from episodic_moba_ppo.lora import (
+    TRAINABLE_HEAD_MODULES,
+    assert_lora_trainable_set,
+    freeze_for_lora,
+)
+from episodic_moba_ppo.ppo import MuonWithAdamWHeads, create_muon_optimizer
+from model import ActorCriticModel
 from transformer import Transformer
 
 
@@ -53,3 +59,80 @@ def test_full_width_delta_changes_logical_projection_only_after_b_updates():
     adapted = attention.project_queries(inputs)
     assert adapted.shape == (1, 3, 4, 96)
     assert not torch.equal(adapted, base)
+
+
+class _VectorObservationSpace:
+    shape = (12,)
+
+
+def _actor_critic() -> ActorCriticModel:
+    return ActorCriticModel(
+        {"hidden_layer_size": 384, "transformer": _config()},
+        _VectorObservationSpace(),
+        (4,),
+        512,
+    )
+
+
+def test_freeze_for_lora_keeps_complete_policy_and_value_heads_trainable():
+    model = _actor_critic()
+    model.enable_lora(rank=8, alpha=16, dropout=0.0)
+    trainable_names = freeze_for_lora(model)
+
+    expected_head_names = {
+        name
+        for name, _ in model.named_parameters()
+        if any(name.startswith(f"{head}.") for head in TRAINABLE_HEAD_MODULES)
+    }
+    actual_names = {
+        name for name, parameter in model.named_parameters() if parameter.requires_grad
+    }
+    lora_names = {name for name in actual_names if "_lora.lora_" in name}
+
+    assert actual_names == lora_names | expected_head_names
+    assert set(trainable_names) == actual_names
+    assert assert_lora_trainable_set(model) == sum(
+        parameter.numel()
+        for _, parameter in model.named_parameters()
+        if parameter.requires_grad
+    )
+
+
+def test_lora_and_complete_heads_receive_gradients_and_optimizer_steps():
+    torch.manual_seed(19)
+    model = _actor_critic()
+    model.enable_lora(rank=8, alpha=16, dropout=0.0)
+    freeze_for_lora(model)
+    # PEFT initializes B to zero, so A receives no signal on the first pass.
+    # A tiny nonzero B makes this a meaningful all-allowed-parameters test.
+    with torch.no_grad():
+        for name, parameter in model.named_parameters():
+            if "_lora.lora_B." in name:
+                parameter.fill_(0.001)
+
+    memory = torch.zeros((2, 3, 3, 384))
+    memory_mask = torch.ones((2, 3), dtype=torch.bool)
+    memory_indices = torch.zeros((2, 3), dtype=torch.long)
+    policy, value, _ = model(
+        torch.randn(2, 12), memory, memory_mask, memory_indices
+    )
+    loss = value.square().mean() + sum(
+        branch.logits.square().mean() for branch in policy
+    )
+    loss.backward()
+
+    allowed = {
+        name
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    }
+    assert all(model.get_parameter(name).grad is not None for name in allowed)
+    assert all(
+        model.get_parameter(name).grad is None
+        for name, parameter in model.named_parameters()
+        if not parameter.requires_grad
+    )
+
+    optimizer = create_muon_optimizer(list(model.named_parameters()))
+    assert isinstance(optimizer, MuonWithAdamWHeads)
+    optimizer.step()

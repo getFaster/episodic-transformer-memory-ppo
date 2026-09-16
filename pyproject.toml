@@ -13,9 +13,11 @@ dependencies = [
     "einops==0.8.1",
     "gymnasium==0.29.0",
     "memory-gym==1.0.2",
+    "minigrid==3.1.0",
     "numpy==1.26.4",
     "peft==0.20.0",
     "pydantic==2.11.7",
+    "pytest>=8.4.2",
     "PyYAML==6.0.2",
     "ruamel.yaml==0.18.15",
     "torch==2.9.1",
@@ -25,6 +27,7 @@ dependencies = [
 
 [project.scripts]
 eval-pretrained = "episodic_moba_ppo.commands.eval_pretrained:main"
+eval-minigrid-pretrained = "episodic_moba_ppo.commands.eval_minigrid_pretrained:main"
 evaluate = "episodic_moba_ppo.commands.evaluate:main"
 train = "episodic_moba_ppo.commands.train:main"
 analyze-retrieval = "episodic_moba_ppo.commands.analyze_retrieval:main"

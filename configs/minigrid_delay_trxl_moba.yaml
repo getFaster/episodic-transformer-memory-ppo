@@ -1,0 +1,116 @@
+schema_version: 1
+task: train-minigrid
+arm: trxl_moba
+provenance:
+  upstream_repo: https://github.com/MarcoMeter/episodic-transformer-memory-ppo
+  upstream_commit: acc5cb2e0cdc87bd7b5ce857d270a72a66146e0b
+  checkpoint_path: models/minigrid.nn
+  checkpoint_sha256: 11065c3fb00abe08555ff4ddb436285cf3351920b5ad1ba8978e071f00dc1375
+environment:
+  name: MiniGrid-MemoryS9-v0
+  scenario: S9
+  backend: minigrid==3.1.0
+  legacy_fallback_backend: gym-minigrid==1.0.2
+  delay_conditions: [32, 64, 96, 128]
+  task_rng_seed: 1
+  seed_start: 0
+  seed_count: 10000
+transformer:
+  num_blocks: 3
+  embed_dim: 384
+  num_heads: 4
+  memory_length: 64
+  positional_encoding: relative
+  layer_norm: post
+  gtrxl: false
+  gtrxl_bias: 0.0
+lora:
+  backend: peft
+  enabled: true
+  targets: [q, k, v, o]
+  rank: 8
+  alpha: 16
+  dropout: 0.0
+  a_init: random
+  b_init: zeros
+attention:
+  budget: 256
+  dense_recent: 128
+  search_horizon: 2560
+  retrieval:
+    enabled: true
+    block_size: 16
+    retrieved_blocks: 8
+    retrieved_tokens: 128
+    score_reduction: max_head
+    tie_break: chronological_block_index
+ppo:
+  updates: 31
+  environment_steps: 507904
+  workers: 32
+  worker_steps: 512
+  epochs: 3
+  minibatches: 8
+  effective_minibatch_size: 2048
+  microbatch_size: 256
+  gamma: 0.995
+  gae_lambda: 0.95
+  clip_range: 0.1
+  entropy_beta_initial: 0.0001
+  entropy_beta_final: 0.000001
+  value_loss_coefficient: 0.5
+  max_grad_norm: 0.25
+  amp: false
+  extension_gate_artifact: null
+optimizer:
+  name: muon
+  initial_lr: 0.02
+  final_lr: 0.00067
+  momentum: 0.95
+  nesterov: true
+  ns_steps: 5
+  weight_decay: 0.01
+  adjust_lr_fn: original
+diagnostics:
+  enabled: true
+  detailed_routing_sample_rate: 0.0
+  artifact_name: routing-details
+  output_path: results/minigrid-delay-sweep/trxl_moba/routing-details.csv
+checkpointing:
+  local_dir: checkpoints/minigrid-delay-sweep/trxl_moba
+  drive_dir: episodic-moba-ppo/checkpoints/minigrid-delay-sweep/trxl_moba
+  every_updates: 5
+  milestone_updates: [31]
+  commit_marker: commit_success.json
+  resume_from: null
+seeds:
+  model: 1
+  environment_start: 0
+  environment_count: 10000
+wandb:
+  enabled: true
+  entity: REPLACE_ME
+  project: episodic-moba-ppo
+  group: minigrid-delay-sweep
+  run_name: minigrid-delay-trxl-moba-seed1
+  run_id: null
+  mode: online
+drive:
+  enabled: true
+  root: REPLACE_ME
+transfer_gate:
+  environment_start: 10000
+  environment_count: 50
+  action_rng_repeats: 3
+  minimum_success_rate: 0.9
+  minimum_mean_return: 0.8
+  output_path: results/minigrid-delay-sweep/transfer_gate.json
+evaluation:
+  delay_conditions: [32, 64, 96, 128]
+  seeds:
+    environment_start: 10000
+    environment_count: 50
+    action_rng_repeats: 3
+  checkpoint_update: 31
+  output_path: results/minigrid-delay-sweep/trxl_moba/evaluation-episodes.jsonl
+  summary_path: results/minigrid-delay-sweep/trxl_moba/evaluation-summary.json

@@ -8,6 +8,8 @@ from typing import Any
 
 import torch
 
+from episodic_moba_ppo.lora import TRAINABLE_HEAD_MODULES
+
 EFFECTIVE_MINIBATCH_SIZE = 2_048
 MICROBATCH_SIZE = 256
 
@@ -130,6 +132,65 @@ def is_lora_parameter_name(name: str) -> bool:
     )
 
 
+def is_trainable_head_parameter_name(name: str) -> bool:
+    """Return whether ``name`` belongs to one of the complete PPO heads."""
+
+    return any(
+        name == head or name.startswith(f"{head}.")
+        for head in TRAINABLE_HEAD_MODULES
+    )
+
+
+class MuonWithAdamWHeads:
+    """One optimizer interface for Muon adapters and AdamW policy/value heads.
+
+    Native Muon is defined for matrices only; the fully trainable heads also
+    contain bias vectors.  Keeping those tensors in AdamW avoids applying a
+    matrix orthogonalization rule to one-dimensional biases while presenting
+    the zero-grad/step/state-dict interface expected by the PPO runtime.
+    """
+
+    def __init__(
+        self, muon: torch.optim.Optimizer, heads: torch.optim.Optimizer
+    ) -> None:
+        self.muon = muon
+        self.heads = heads
+
+    @property
+    def param_groups(self) -> list[dict[str, Any]]:
+        return [*self.muon.param_groups, *self.heads.param_groups]
+
+    def zero_grad(self, set_to_none: bool = True) -> None:
+        self.muon.zero_grad(set_to_none=set_to_none)
+        self.heads.zero_grad(set_to_none=set_to_none)
+
+    @torch.no_grad()
+    def step(self, closure: Callable[[], float] | None = None) -> float | None:
+        if closure is None:
+            self.muon.step()
+            self.heads.step()
+            return None
+        # PPO does not use closures, but run a supplied closure once rather
+        # than evaluating the loss twice through the wrapped optimizers.
+        loss = closure()
+        self.muon.step()
+        self.heads.step()
+        return loss
+
+    def state_dict(self) -> dict[str, Any]:
+        return {
+            "format": "muon_with_adamw_heads_v1",
+            "muon": self.muon.state_dict(),
+            "heads": self.heads.state_dict(),
+        }
+
+    def load_state_dict(self, state_dict: Mapping[str, Any]) -> None:
+        if state_dict.get("format") != "muon_with_adamw_heads_v1":
+            raise ValueError("checkpoint optimizer is not a Muon-with-heads state")
+        self.muon.load_state_dict(state_dict["muon"])
+        self.heads.load_state_dict(state_dict["heads"])
+
+
 def create_muon_optimizer(
     named_parameters: Mapping[str, torch.nn.Parameter]
     | Sequence[tuple[str, torch.nn.Parameter]],
@@ -140,9 +201,15 @@ def create_muon_optimizer(
     ns_steps: int = 5,
     weight_decay: float = 0.01,
     adjust_lr_fn: str = "original",
-    expected_trainable_count: int | None = 73_728,
-) -> torch.optim.Optimizer:
-    """Construct native PyTorch Muon over LoRA matrices, failing closed."""
+    expected_trainable_count: int | None = None,
+) -> torch.optim.Optimizer | MuonWithAdamWHeads:
+    """Construct matched adapters/heads optimizers, failing closed.
+
+    LoRA matrices use the experiment's native Muon settings.  Complete policy
+    and value heads use AdamW because their biases are vectors.  The default
+    count is intentionally dynamic: MiniGrid action spaces determine the
+    policy-branch width, unlike the historical Mortar-only constant.
+    """
 
     source = (
         named_parameters.items()
@@ -153,22 +220,41 @@ def create_muon_optimizer(
     trainable = [
         (name, parameter) for name, parameter in items if parameter.requires_grad
     ]
-    unexpected = [name for name, _ in trainable if not is_lora_parameter_name(name)]
+    unexpected = [
+        name
+        for name, _ in trainable
+        if not is_lora_parameter_name(name)
+        and not is_trainable_head_parameter_name(name)
+    ]
     if unexpected:
-        raise ValueError(f"non-LoRA trainable parameters: {unexpected}")
+        raise ValueError(f"unexpected trainable parameters: {unexpected}")
     if not trainable:
+        raise ValueError("no trainable LoRA/head parameters found")
+    lora_parameters = [
+        (name, parameter)
+        for name, parameter in trainable
+        if is_lora_parameter_name(name)
+    ]
+    head_parameters = [
+        (name, parameter)
+        for name, parameter in trainable
+        if is_trainable_head_parameter_name(name)
+    ]
+    if not lora_parameters:
         raise ValueError("no trainable LoRA parameters found")
-    non_matrix = [name for name, parameter in trainable if parameter.ndim != 2]
+    non_matrix = [
+        name for name, parameter in lora_parameters if parameter.ndim != 2
+    ]
     if non_matrix:
         raise ValueError(f"Muon requires 2-D LoRA matrices: {non_matrix}")
     count = sum(parameter.numel() for _, parameter in trainable)
     if expected_trainable_count is not None and count != expected_trainable_count:
         raise ValueError(
-            f"expected {expected_trainable_count} trainable LoRA parameters, "
+            f"expected {expected_trainable_count} trainable LoRA/head parameters, "
             f"got {count}"
         )
-    return torch.optim.Muon(
-        [parameter for _, parameter in trainable],
+    muon = torch.optim.Muon(
+        [parameter for _, parameter in lora_parameters],
         lr=lr,
         momentum=momentum,
         nesterov=nesterov,
@@ -176,3 +262,11 @@ def create_muon_optimizer(
         weight_decay=weight_decay,
         adjust_lr_fn=adjust_lr_fn,
     )
+    if not head_parameters:
+        return muon
+    heads = torch.optim.AdamW(
+        [parameter for _, parameter in head_parameters],
+        lr=lr,
+        weight_decay=weight_decay,
+    )
+    return MuonWithAdamWHeads(muon, heads)
