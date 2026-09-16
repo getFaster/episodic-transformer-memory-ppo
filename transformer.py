@@ -342,8 +342,12 @@ class Transformer(nn.Module):
         block = self.transformer_blocks[layer_index]
         query_2d = query.reshape(-1, self.embed_dim)
         history_2d = history.reshape(-1, self.embed_dim)
-        normalized_query = block.norm1(query_2d)
-        normalized_history = block.norm_kv(history_2d)
+        normalized_query = (
+            block.norm1(query_2d) if block.layer_norm == "pre" else query_2d
+        )
+        normalized_history = (
+            block.norm_kv(history_2d) if block.layer_norm == "pre" else history_2d
+        )
         selection = select_moba_context(
             normalized_query,
             normalized_history,
@@ -365,34 +369,35 @@ class Transformer(nn.Module):
 
     @staticmethod
     def _normalized_block_summaries_cpu(block, candidate_blocks, layer_index):
-        """Return ``mean(norm_kv(token))`` summaries without moving old bodies.
+        """Return attention-input block summaries without moving old bodies.
 
         Episode traces intentionally retain all old token bodies on CPU.  The
-        pretrained layer norm is frozen, so applying its detached parameters
-        to each CPU token is exact and lets routing transfer only one
-        full-width summary per candidate block.  In particular, this must not
-        be replaced by ``norm_kv(mean(token))``: LayerNorm is nonlinear.
+        pre-norm attention uses ``mean(norm_kv(token))``; post-norm attention
+        uses ``mean(token)``. Only one full-width summary per candidate block
+        crosses to the model device.
         """
         if not candidate_blocks:
             return torch.empty(
                 (0, block.attention.embed_dim), dtype=torch.float32, device="cpu"
             )
-        norm = block.norm_kv
-        weight = norm.weight.detach().to(device="cpu", dtype=torch.float32)
-        bias = norm.bias.detach().to(device="cpu", dtype=torch.float32)
+        if block.layer_norm == "pre":
+            norm = block.norm_kv
+            weight = norm.weight.detach().to(device="cpu", dtype=torch.float32)
+            bias = norm.bias.detach().to(device="cpu", dtype=torch.float32)
         summaries = []
         for historical_block in candidate_blocks:
             token_bodies = historical_block.states[:, layer_index]
             if token_bodies.device.type != "cpu":
                 raise AssertionError("unselected historical token bodies must stay on CPU")
-            normalized = F.layer_norm(
-                token_bodies,
-                norm.normalized_shape,
-                weight,
-                bias,
-                norm.eps,
-            )
-            summaries.append(normalized.mean(dim=0))
+            if block.layer_norm == "pre":
+                token_bodies = F.layer_norm(
+                    token_bodies,
+                    norm.normalized_shape,
+                    weight,
+                    bias,
+                    norm.eps,
+                )
+            summaries.append(token_bodies.mean(dim=0))
         return torch.stack(summaries)
 
     def forward_long_history(
@@ -440,9 +445,9 @@ class Transformer(nn.Module):
 
                     candidate_blocks = episode_context.old_blocks
                     if candidate_blocks:
-                        # Apply norm_kv to every raw CPU token before taking
-                        # the block mean.  Only these compact summaries cross
-                        # to the model device for current-Q/K routing.
+                        # Summarize CPU tokens using the layer's attention
+                        # input convention. Only compact summaries cross to
+                        # the model device for current-Q/K routing.
                         normalized_summaries = (
                             self._normalized_block_summaries_cpu(
                                 block, candidate_blocks, layer_index
@@ -458,7 +463,10 @@ class Transformer(nn.Module):
                         block_indices = torch.empty(
                             0, dtype=torch.long, device=h.device
                         )
-                    normalized_query = block.norm1(h[sample_index].reshape(1, -1))
+                    query = h[sample_index].reshape(1, -1)
+                    normalized_query = (
+                        block.norm1(query) if block.layer_norm == "pre" else query
+                    )
                     block_selection = select_moba_blocks(
                         normalized_query,
                         normalized_summaries,

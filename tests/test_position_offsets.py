@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from transformer import Transformer
@@ -33,9 +34,12 @@ def test_dense_position_helper_matches_original_forward_expression():
     torch.testing.assert_close(transformer.position_embeddings(indices), expected)
 
 
-def test_routed_context_adds_true_absolute_positions_after_selection():
+@pytest.mark.parametrize("layer_norm", ["pre", "post"])
+def test_routed_context_adds_true_absolute_positions_after_selection(layer_norm):
     torch.manual_seed(3)
-    transformer = Transformer(_config(), input_dim=384, max_episode_steps=512)
+    config = _config()
+    config["layer_norm"] = layer_norm
+    transformer = Transformer(config, input_dim=384, max_episode_steps=512)
     history = torch.zeros(192, 384)
     timesteps = torch.arange(192)
     context, selection = transformer.route_layer_context(

@@ -67,13 +67,14 @@ def test_invalid_budget_is_rejected():
         )
 
 
-def test_long_history_forward_runs_all_layers_and_returns_diagnostics():
+@pytest.mark.parametrize("layer_norm", ["pre", "post"])
+def test_long_history_forward_runs_all_layers_and_returns_diagnostics(layer_norm):
     config = {
         "num_blocks": 3,
         "embed_dim": 384,
         "num_heads": 4,
         "positional_encoding": "relative",
-        "layer_norm": "pre",
+        "layer_norm": layer_norm,
         "gtrxl": False,
     }
     torch.manual_seed(13)

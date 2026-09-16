@@ -96,9 +96,10 @@ def select_moba_context(
 ) -> MobaSelection:
     """Select old fixed blocks plus dense recent history.
 
-    ``normalized_history`` must contain content-only, per-token normalized
-    states. Its block means are projected under the current K weights, which is
-    exactly equivalent to averaging their bias-free K projections.
+    ``normalized_history`` contains content-only attention inputs: normalized
+    tokens for pre-norm blocks, raw tokens for post-norm blocks. Its block means
+    are projected under the current K weights, equivalent to averaging their
+    bias-free K projections.
     """
     if normalized_history.ndim != 2:
         raise ValueError("normalized_history must have shape (time, embed_dim)")

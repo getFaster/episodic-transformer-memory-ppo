@@ -123,3 +123,27 @@ def test_routing_summary_means_tokenwise_normalized_cpu_states() -> None:
     assert not torch.allclose(actual, wrong_order)
     assert actual.device.type == "cpu"
     assert all(old.states.device.type == "cpu" for old in context.old_blocks)
+
+
+def test_post_norm_routing_summary_uses_raw_cpu_states() -> None:
+    config = {
+        "num_blocks": 3,
+        "embed_dim": 384,
+        "num_heads": 4,
+        "positional_encoding": "relative",
+        "layer_norm": "post",
+        "gtrxl": False,
+    }
+    transformer = Transformer(config, input_dim=384, max_episode_steps=512)
+    trace = TraceRegistry(num_layers=3, width=384).start_worker(0)
+    for timestep in range(12):
+        trace.append(torch.randn(3, 384), timestep=timestep)
+    context = trace.context(12, dense_recent=4, search_horizon=12, block_size=4)
+
+    actual = transformer._normalized_block_summaries_cpu(
+        transformer.transformer_blocks[0], context.old_blocks, layer_index=0
+    )
+    expected = torch.stack(
+        [old.states[:, 0].mean(dim=0) for old in context.old_blocks]
+    )
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
