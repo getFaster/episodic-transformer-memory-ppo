@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 import torch
 
-
 Projection = Callable[[torch.Tensor], torch.Tensor]
+USEFUL_ATTENTION_THRESHOLD = 1e-6
 
 
 @dataclass(frozen=True)
@@ -20,6 +20,8 @@ class MobaSelection:
     selected_block_ranges: tuple[tuple[int, int], ...]
     candidate_block_indices: torch.Tensor
     routing_scores: torch.Tensor
+    retrieved_attention_mass: float = 0.0
+    useful_retrieval: bool = False
 
     @property
     def candidate_count(self) -> int:

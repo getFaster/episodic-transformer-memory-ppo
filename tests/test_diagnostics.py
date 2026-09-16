@@ -21,6 +21,8 @@ def _selection():
         selected_block_ranges=((32, 47), (80, 95)),
         candidate_block_indices=torch.tensor([2, 4, 5]),
         routing_scores=torch.tensor([0.1, 0.2, 0.3], requires_grad=True),
+        retrieved_attention_mass=0.4,
+        useful_retrieval=True,
     )
 
 
@@ -60,7 +62,7 @@ def test_collector_aggregates_and_writes_analysis_compatible_rows(tmp_path) -> N
         update=3,
     )
 
-    metrics = collector.metrics(reset=True)
+    metrics = collector.metrics()
     assert metrics["routing/layer_0/query_count"] == 2
     assert metrics["routing/layer_0/candidate_count_mean"] == 1.5
     assert metrics["routing/layer_0/no_eligible_fraction"] == 0.5
@@ -69,6 +71,15 @@ def test_collector_aggregates_and_writes_analysis_compatible_rows(tmp_path) -> N
     assert metrics["routing/layer_0/fraction_outside_512"] == 1.0
     assert metrics["routing/layer_0/selection_entropy"] == pytest.approx(1.0)
     assert metrics["routing/layer_0/selection_diversity"] == pytest.approx(1.0)
+
+    moba = collector.moba_metrics(dense_recent=128, reset=True)
+    assert moba.values["moba/selected_distance_mean"] == pytest.approx(729)
+    assert moba.values["moba/selected_distance_p90"] == pytest.approx(748.2)
+    assert moba.values["moba/fraction_beyond_recent_window"] == 1.0
+    assert moba.values["moba/unique_blocks_selected"] == 1.0
+    assert moba.values["moba/retrieved_attention_mass"] == pytest.approx(0.2)
+    assert moba.values["moba/useful_retrieval_rate"] == 0.5
+    assert moba.retrieval_distances == (753, 705)
 
     path = collector.write_details(tmp_path / "routing-details.csv")
     assert path is not None

@@ -63,6 +63,13 @@ class _LayerAggregate:
     selected_indices: Counter[int] = field(default_factory=Counter)
     score_total: float = 0.0
     score_count: int = 0
+    retrieved_attention_mass_total: float = 0.0
+
+
+@dataclass(frozen=True)
+class MobaMetrics:
+    values: Mapping[str, float]
+    retrieval_distances: tuple[int, ...]
 
 
 def summarize_selection(
@@ -130,6 +137,9 @@ class RoutingDiagnostics:
         self._random = random.Random(random_seed)
         self._layers: dict[int, _LayerAggregate] = defaultdict(_LayerAggregate)
         self._detail_rows: list[dict[str, Any]] = []
+        self._retrieval_distances: list[int] = []
+        self._query_keys: set[tuple[int | str, int]] = set()
+        self._useful_query_keys: set[tuple[int | str, int]] = set()
 
     def observe(
         self,
@@ -157,8 +167,13 @@ class RoutingDiagnostics:
                     summary.query_timestep - end
                     for _, end in summary.selected_ranges
                 ]
+                query_key = (reference.trace_id, reference.query_timestep)
+                self._query_keys.add(query_key)
+                if selection.useful_retrieval:
+                    self._useful_query_keys.add(query_key)
                 aggregate.selected_total += len(distances)
                 aggregate.distance_total += sum(distances)
+                self._retrieval_distances.extend(distances)
                 aggregate.distance_max = max(
                     aggregate.distance_max, summary.max_distance
                 )
@@ -169,6 +184,9 @@ class RoutingDiagnostics:
                 aggregate.selected_indices.update(summary.selected_indices)
                 aggregate.score_total += sum(summary.selected_scores)
                 aggregate.score_count += len(summary.selected_scores)
+                aggregate.retrieved_attention_mass_total += float(
+                    selection.retrieved_attention_mass
+                )
                 if self._random.random() < self.sample_rate:
                     self._sample_rows(summary, reference, update)
 
@@ -259,6 +277,46 @@ class RoutingDiagnostics:
         if reset:
             self._layers.clear()
         return metrics
+
+    def moba_metrics(self, *, dense_recent: int, reset: bool = False) -> MobaMetrics:
+        """Return layer-aggregated, bounded W&B diagnostics for one update."""
+        distances = tuple(self._retrieval_distances)
+        selected_total = sum(layer.selected_total for layer in self._layers.values())
+        query_total = sum(layer.queries for layer in self._layers.values())
+        counts: Counter[int] = Counter()
+        for layer in self._layers.values():
+            counts.update(layer.selected_indices)
+        entropy, _ = self._entropy_and_diversity(counts, selected_total)
+        attention_mass = sum(
+            layer.retrieved_attention_mass_total for layer in self._layers.values()
+        )
+        values = {
+            "moba/selected_distance_mean": (
+                sum(distances) / len(distances) if distances else 0.0
+            ),
+            "moba/selected_distance_p90": (
+                float(torch.quantile(torch.tensor(distances, dtype=torch.float32), 0.9))
+                if distances
+                else 0.0
+            ),
+            "moba/fraction_beyond_recent_window": (
+                sum(distance > dense_recent for distance in distances) / len(distances)
+                if distances
+                else 0.0
+            ),
+            "moba/selection_entropy": entropy,
+            "moba/unique_blocks_selected": selected_total / max(1, query_total),
+            "moba/retrieved_attention_mass": attention_mass / max(1, query_total),
+            "moba/useful_retrieval_rate": len(self._useful_query_keys)
+            / max(1, len(self._query_keys)),
+        }
+        result = MobaMetrics(values=values, retrieval_distances=distances)
+        if reset:
+            self._layers.clear()
+            self._retrieval_distances.clear()
+            self._query_keys.clear()
+            self._useful_query_keys.clear()
+        return result
 
     def write_details(self, path: str | Path) -> Path | None:
         if not self._detail_rows:

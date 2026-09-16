@@ -16,6 +16,7 @@ from episodic_moba_ppo.evaluation import (
     episode_specs,
     evaluate_policy,
 )
+from episodic_moba_ppo.logging import NoOpLogger, WandbLogger
 
 
 def _load_factory(specification: str) -> Any:
@@ -43,6 +44,14 @@ def build_parser() -> argparse.ArgumentParser:
         default="episodic_moba_ppo.evaluation_policy:load_evaluation_policy",
         help="Callable(checkpoint_path, env, **metadata) returning EvaluationPolicy",
     )
+    parser.add_argument(
+        "--wandb-mode",
+        choices=("online", "offline", "disabled"),
+        default="disabled",
+    )
+    parser.add_argument("--wandb-entity")
+    parser.add_argument("--wandb-project", default="episodic-moba-ppo")
+    parser.add_argument("--wandb-run-name")
     return parser
 
 
@@ -112,6 +121,7 @@ def main(argv: list[str] | None = None) -> int:
                 checkpoint_update=checkpoint_update,
             )
         )
+    summary = aggregate_records(records)
     atomic_write_json(
         args.output,
         {
@@ -120,10 +130,45 @@ def main(argv: list[str] | None = None) -> int:
             "checkpoint_update": checkpoint_update,
             "arm": args.arm,
             "model_seed": args.model_seed,
-            "summary_by_command_count": aggregate_records(records),
+            "summary_by_command_count": summary,
             "episodes": [asdict(record) for record in records],
         },
     )
+    logger = NoOpLogger()
+    if args.wandb_mode != "disabled":
+        logger = WandbLogger(
+            entity=args.wandb_entity,
+            project=args.wandb_project,
+            name=(
+                args.wandb_run_name
+                or f"{args.arm}-seed{args.model_seed}-evaluation"
+            ),
+            run_id=None,
+            mode=args.wandb_mode,
+            config={
+                "task": "evaluate",
+                "arm": args.arm,
+                "model_seed": args.model_seed,
+                "checkpoint_sha256": checkpoint_hash,
+                "checkpoint_update": checkpoint_update,
+                "memory_delay_axis": "command_count",
+            },
+        )
+    evaluation_step = int(checkpoint_update or 0) * 16_384
+    logger.log_records(
+        "eval/success_by_memory_delay",
+        [
+            {
+                "memory_delay": int(command_count),
+                "success_rate": values["success_rate"],
+                "episodes": values["episodes"],
+            }
+            for command_count, values in summary.items()
+        ],
+        step=evaluation_step,
+    )
+    logger.log({"charts/global_step": evaluation_step}, step=evaluation_step)
+    logger.finish()
     print(f"evaluation complete: {args.output}")
     return 0
 

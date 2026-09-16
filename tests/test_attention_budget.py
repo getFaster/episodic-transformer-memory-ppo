@@ -109,3 +109,5 @@ def test_long_history_forward_runs_all_layers_and_returns_diagnostics():
         assert selection is not None
         assert selection.context_indices.numel() <= 256
         assert layer_weights[0].shape[-1] == selection.context_indices.numel()
+        assert 0.0 <= selection.retrieved_attention_mass <= 1.0
+        assert selection.useful_retrieval

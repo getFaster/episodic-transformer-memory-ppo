@@ -18,6 +18,8 @@ class RunLogger(Protocol):
         self, name: str, records: list[Mapping[str, Any]], *, step: int
     ) -> None: ...
 
+    def log_histogram(self, name: str, values: list[float], *, step: int) -> None: ...
+
     def log_artifact(
         self, path: str, *, name: str, metadata: Mapping[str, Any]
     ) -> None: ...
@@ -40,6 +42,9 @@ class NoOpLogger:
         self, name: str, records: list[Mapping[str, Any]], *, step: int
     ) -> None:
         del name, records, step
+
+    def log_histogram(self, name: str, values: list[float], *, step: int) -> None:
+        del name, values, step
 
     def log_artifact(
         self, path: str, *, name: str, metadata: Mapping[str, Any]
@@ -75,13 +80,18 @@ class WandbLogger:
             init_kwargs["entity"] = entity
 
         self._run = wandb.init(**init_kwargs)
+        define_metric = getattr(self._run, "define_metric", None)
+        if callable(define_metric):
+            define_metric("charts/global_step")
+            define_metric("*", step_metric="charts/global_step")
 
     @property
     def identity(self) -> Mapping[str, Any]:
         return {"backend": "wandb", "run_id": self._run.id, "name": self._run.name}
 
     def log(self, values: Mapping[str, Any], *, step: int) -> None:
-        self._run.log(dict(values), step=step)
+        del step
+        self._run.log(dict(values))
 
     def log_run_metadata(self, values: Mapping[str, Any]) -> None:
         self._run.config.update(dict(values), allow_val_change=True)
@@ -98,7 +108,16 @@ class WandbLogger:
             columns=columns,
             data=[[record.get(column) for column in columns] for record in records],
         )
-        self._run.log({name: table}, step=step)
+        del step
+        self._run.log({name: table})
+
+    def log_histogram(self, name: str, values: list[float], *, step: int) -> None:
+        if not values:
+            return
+        import wandb
+
+        del step
+        self._run.log({name: wandb.Histogram(values)})
 
     def log_artifact(
         self, path: str, *, name: str, metadata: Mapping[str, Any]

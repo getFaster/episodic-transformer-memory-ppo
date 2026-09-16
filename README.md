@@ -101,9 +101,22 @@ uv run train --config configs/trxl_moba_command40.yaml --repo-root .
 Evaluate a durable checkpoint and produce descriptive routing distributions:
 
 ```bash
-uv run evaluate --checkpoint /path/to/durable/checkpoint --arm trxl_moba --model-seed 1 --output results/seed1.json
+uv run evaluate --checkpoint /path/to/durable/checkpoint --arm trxl_moba --model-seed 1 --output results/seed1.json --wandb-mode online
 uv run analyze-retrieval --config configs/analyze_retrieval.yaml
 ```
+
+Both training arms use the same W&B scalar names under `charts/`, `losses/`,
+`moba/`, `lora/`, and `perf/`. MoBA retrieval summaries are aggregated across
+layers and are published immediately after each rollout, before PPO
+optimization. Loss and LoRA diagnostics are published after optimization;
+full attention matrices are never logged. Retrieval-distance
+histograms are emitted every five completed PPO updates. Evaluation writes a
+row for every configured command-count memory-delay value to
+`eval/success_by_memory_delay`; evaluation W&B logging is opt-in through
+`--wandb-mode` so local JSON-only evaluation remains available. Useful
+retrieval uses an attention-mass threshold of `1e-6`, recorded in the run
+metadata. During a long rollout, cumulative rollout, episode, throughput, and
+retrieval summaries are also refreshed every 2,048 environment steps.
 
 The baseline gate is intentionally fail-closed. The original upstream
 `python train.py` and legacy environment examples that follow are retained as

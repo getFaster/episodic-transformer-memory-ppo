@@ -1,10 +1,12 @@
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
+from typing import Any
+
 import numpy as np
 import torch
-
-from dataclasses import dataclass
-from typing import Any, Sequence
 from torch import nn
 from torch.nn import functional as F
+
 from utils import Module
 
 
@@ -116,7 +118,7 @@ class MultiHeadAttention(nn.Module):
         """
         # Get number of training examples and sequence lengths
         N = queries.shape[0]
-        value_len, key_len, query_len = values.shape[1], keys.shape[1], queries.shape[1]
+        query_len = queries.shape[1]
 
         # Split into heads before projection. The same head-sized Q/K/V
         # projection is intentionally shared by all heads for compatibility
@@ -431,6 +433,7 @@ class Transformer(nn.Module):
             for sample_index, episode_context in enumerate(contexts):
                 if arm == "trxl_moba":
                     from episodic_moba_ppo.moba_retrieval import (
+                        USEFUL_ATTENTION_THRESHOLD,
                         MobaSelection,
                         select_moba_blocks,
                     )
@@ -548,6 +551,33 @@ class Transformer(nn.Module):
                     h[sample_index].reshape(1, 1, self.embed_dim),
                     mask,
                 )
+                if selection is not None:
+                    retrieved_tokens = attended.shape[0] - int(
+                        episode_context.dense_timesteps.numel()
+                    )
+                    retrieved_mass = (
+                        float(
+                            sample_weights[..., :retrieved_tokens]
+                            .sum(dim=-1)
+                            .mean()
+                            .detach()
+                            .cpu()
+                        )
+                        if retrieved_tokens
+                        else 0.0
+                    )
+                    has_distant_block = any(
+                        episode_context.query_timestep - end > dense_recent
+                        for _, end in selection.selected_block_ranges
+                    )
+                    selection = replace(
+                        selection,
+                        retrieved_attention_mass=retrieved_mass,
+                        useful_retrieval=(
+                            has_distant_block
+                            and retrieved_mass > USEFUL_ATTENTION_THRESHOLD
+                        ),
+                    )
                 next_hidden.append(sample_hidden.reshape(self.embed_dim))
                 layer_routing.append(selection)
                 layer_weights.append(sample_weights)
