@@ -13,8 +13,8 @@ from episodic_moba_ppo.commands import evaluate
 from episodic_moba_ppo.config import TrainConfig, load_config
 from episodic_moba_ppo.evaluation import EpisodeRecord
 from episodic_moba_ppo.evaluation_policy import (
-    TrainingCheckpoint,
     TrainedLongHistoryPolicy,
+    TrainingCheckpoint,
     load_training_checkpoint,
 )
 

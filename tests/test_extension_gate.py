@@ -9,7 +9,6 @@ from episodic_moba_ppo.extension_gate import (
     validate_extension_gate,
 )
 
-
 COMMIT = "a" * 40
 CHECKPOINT = "b" * 64
 

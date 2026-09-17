@@ -7,7 +7,6 @@ from collections.abc import Iterator
 from peft import LoraConfig, inject_adapter_in_model
 from torch import nn
 
-
 PEFT_ADAPTER_NAME = "default"
 PEFT_TARGET_MODULES = ("query_lora", "key_lora", "value_lora", "output_lora")
 

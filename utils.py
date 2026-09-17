@@ -1,7 +1,7 @@
 import numpy as np
 import torch
-
 from torch import nn
+
 
 def create_env(config:dict, render:bool=False):
     """Initializes an environment based on the provided environment name.

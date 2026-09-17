@@ -14,13 +14,12 @@ MiniGrid backend.
 from __future__ import annotations
 
 import copy
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from importlib import metadata as package_metadata
 from typing import Any, Literal
 
 import numpy as np
-
 
 DelayCondition = Literal[32, 64, 96, 128]
 DelayBackend = Literal["minigrid", "gym_minigrid"]
@@ -452,7 +451,7 @@ class MiniGridTaskFactory:
 
     def for_adapter_bridge_length(
         self, adapter_bridge_length: DelayCondition | int
-    ) -> "FixedDelayMiniGridTaskFactory":
+    ) -> FixedDelayMiniGridTaskFactory:
         """Return an evaluator factory pinned to one adapter bridge length.
 
         The condition is validated here so evaluator setup fails before it

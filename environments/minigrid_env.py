@@ -1,9 +1,10 @@
-import gym
-import numpy as np
 import time
 
+import gym
+import numpy as np
 from gym import spaces
 from gym_minigrid.wrappers import *
+
 
 class Minigrid:
     def __init__(self, name):

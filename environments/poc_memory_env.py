@@ -1,11 +1,12 @@
-from gym.spaces import space
+import os
+import time
+
 import numpy as np
 from gym import spaces
-import time
-import os
 from reprint import output
 
-class PocMemoryEnv():
+
+class PocMemoryEnv:
     """
     Proof of Concept Memory Environment
 

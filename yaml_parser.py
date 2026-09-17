@@ -1,5 +1,6 @@
 from ruamel.yaml import YAML
 
+
 class YamlParser:
     """The YamlParser parses a yaml file containing parameters for the environment, model, evaulation, and trainer.
     The data is parsed during initialization.

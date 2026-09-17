@@ -3,6 +3,7 @@ import multiprocessing.connection
 
 from utils import create_env
 
+
 def worker_process(remote: multiprocessing.connection.Connection, config:dict) -> None:
     """Executes the threaded interface to the environment.
     
@@ -48,15 +49,17 @@ class Worker:
         self.process.start()
 
 import tblib.pickling_support
+
 tblib.pickling_support.install()
 import sys
+
 
 class WorkerException(Exception):
     """Exception that is raised in the worker process and re-raised in the main process."""
     def __init__(self, ee):
         self.ee = ee
         __,  __, self.tb = sys.exc_info()
-        super(WorkerException, self).__init__(str(ee))
+        super().__init__(str(ee))
 
     def re_raise(self):
         raise (self.ee, None, self.tb)

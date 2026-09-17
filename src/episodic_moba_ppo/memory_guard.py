@@ -7,11 +7,10 @@ import json
 import os
 import signal
 import time
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Sequence
-
 
 MIB = 1024**2
 SIZE_SUFFIXES = {
@@ -98,7 +97,7 @@ class ProgressReporter:
             ppo_minibatches_completed=int(ppo_minibatches_completed),
             ppo_minibatches_total=int(ppo_minibatches_total),
             discard_score=discard_score,
-            timestamp_utc=datetime.now(timezone.utc).isoformat(),
+            timestamp_utc=datetime.now(UTC).isoformat(),
         )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")

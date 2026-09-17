@@ -1,17 +1,23 @@
-import numpy as np
 import os
 import pickle
 import time
-import torch
-
 from collections import deque
+
+import numpy as np
+import torch
 from torch import optim
 from torch.utils.tensorboard import SummaryWriter
 
 from buffer import Buffer
 from model import ActorCriticModel
-from utils import batched_index_select, create_env, polynomial_decay, process_episode_info
+from utils import (
+    batched_index_select,
+    create_env,
+    polynomial_decay,
+    process_episode_info,
+)
 from worker import Worker
+
 
 class PPOTrainer:
     def __init__(self, config:dict, run_id:str="run", device:torch.device=torch.device("cpu")) -> None:
@@ -313,7 +319,7 @@ class PPOTrainer:
 
         # Monitor additional training stats
         approx_kl = (ratio - 1.0) - log_ratio # http://joschu.net/blog/kl-approx.html
-        clip_fraction = (abs((ratio - 1.0)) > clip_range).float().mean()
+        clip_fraction = (abs(ratio - 1.0) > clip_range).float().mean()
 
         return [policy_loss.cpu().data.numpy(),
                 vf_loss.cpu().data.numpy(),

@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from episodic_moba_ppo.commands import eval_pretrained
 from episodic_moba_ppo.evaluation import (
     EVALUATION_SEEDS,
     EpisodeRecord,
@@ -14,7 +15,6 @@ from episodic_moba_ppo.evaluation import (
     normalized_return,
     paired_action_seed,
 )
-from episodic_moba_ppo.commands import eval_pretrained
 
 
 class FakePolicy:

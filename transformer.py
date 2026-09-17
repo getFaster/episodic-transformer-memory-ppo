@@ -28,7 +28,7 @@ class MultiHeadAttention(nn.Module):
             embed_dim {int} -- Size of the embedding dimension
             num_heads {int} -- Number of attention heads
         """
-        super(MultiHeadAttention, self).__init__()
+        super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.head_size = embed_dim // num_heads
@@ -165,7 +165,7 @@ class TransformerBlock(Module):
             num_heads {int} -- Number of attention headds
             config {dict} -- General config
         """
-        super(TransformerBlock, self).__init__()
+        super().__init__()
 
         # Attention
         self.attention = MultiHeadAttention(embed_dim, num_heads)
@@ -645,7 +645,7 @@ class GRUGate(nn.Module):
             be close to the identity map. This can greatly improve the learning speed and stability since it
             initializes the agent close to a Markovian policy (ignore attention at the beginning). (default: {0.0})
         """
-        super(GRUGate, self).__init__()
+        super().__init__()
         self.Wr = nn.Linear(input_dim, input_dim, bias=False)
         self.Ur = nn.Linear(input_dim, input_dim, bias=False)
         self.Wz = nn.Linear(input_dim, input_dim, bias=False)

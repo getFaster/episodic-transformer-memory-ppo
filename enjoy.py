@@ -1,10 +1,12 @@
-import numpy as np
 import pickle
-import torch
 
+import numpy as np
+import torch
 from docopt import docopt
+
 from model import ActorCriticModel
 from utils import create_env
+
 
 def init_transformer_memory(trxl_conf, max_episode_steps, device):
     """Returns initial tensors for the episodic memory of the transformer.

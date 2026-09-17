@@ -1,7 +1,9 @@
 import torch
 from docopt import docopt
+
 from trainer import PPOTrainer
 from yaml_parser import YamlParser
+
 
 def main():
     # Command line arguments via docopt

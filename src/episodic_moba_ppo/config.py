@@ -10,7 +10,6 @@ from typing import Annotated, Literal, TypeAlias
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
-
 Arm: TypeAlias = Literal["trxl", "trxl_moba"]
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
@@ -30,7 +29,7 @@ class ProvenanceConfig(StrictModel):
     checkpoint_sha256: str
 
     @model_validator(mode="after")
-    def validate_hashes(self) -> "ProvenanceConfig":
+    def validate_hashes(self) -> ProvenanceConfig:
         if not _COMMIT_RE.fullmatch(self.upstream_commit):
             raise ValueError("upstream_commit must be a lowercase 40-character Git hash")
         if not _SHA256_RE.fullmatch(self.checkpoint_sha256):
@@ -98,7 +97,7 @@ class MiniGridEnvironmentConfig(StrictModel):
     seed_count: Annotated[int, Field(ge=1)]
 
     @model_validator(mode="after")
-    def validate_delay_sweep(self) -> "MiniGridEnvironmentConfig":
+    def validate_delay_sweep(self) -> MiniGridEnvironmentConfig:
         if self.delay_conditions != [32, 64, 96, 128]:
             raise ValueError("MiniGrid delay_conditions must be [32, 64, 96, 128]")
         return self
@@ -128,7 +127,7 @@ class LoraConfig(StrictModel):
     b_init: Literal["zeros"]
 
     @model_validator(mode="after")
-    def validate_targets(self) -> "LoraConfig":
+    def validate_targets(self) -> LoraConfig:
         if self.targets != ["q", "k", "v", "o"]:
             raise ValueError("LoRA targets must be exactly [q, k, v, o] in every layer")
         return self
@@ -143,7 +142,7 @@ class RetrievalConfig(StrictModel):
     tie_break: Literal["chronological_block_index"]
 
     @model_validator(mode="after")
-    def validate_capacity(self) -> "RetrievalConfig":
+    def validate_capacity(self) -> RetrievalConfig:
         expected = self.block_size * self.retrieved_blocks
         if self.retrieved_tokens != expected:
             raise ValueError(
@@ -160,7 +159,7 @@ class AttentionConfig(StrictModel):
     retrieval: RetrievalConfig
 
     @model_validator(mode="after")
-    def validate_budget(self) -> "AttentionConfig":
+    def validate_budget(self) -> AttentionConfig:
         if self.dense_recent > self.budget:
             raise ValueError("dense_recent cannot exceed attention budget")
         if self.search_horizon < self.budget:
@@ -194,7 +193,7 @@ class PPOConfig(StrictModel):
     extension_gate_artifact: str | None
 
     @model_validator(mode="after")
-    def validate_rollout_and_training_budget(self) -> "PPOConfig":
+    def validate_rollout_and_training_budget(self) -> PPOConfig:
         rollout_size = self.workers * self.worker_steps
         if rollout_size != 16_384:
             raise ValueError("rollout must contain exactly 16,384 environment steps")
@@ -253,7 +252,7 @@ class CheckpointConfig(StrictModel):
     resume_from: str | None
 
     @model_validator(mode="after")
-    def validate_milestones(self) -> "CheckpointConfig":
+    def validate_milestones(self) -> CheckpointConfig:
         if 31 not in self.milestone_updates:
             raise ValueError("checkpoint milestone_updates must contain update 31")
         if len(set(self.milestone_updates)) != len(self.milestone_updates):
@@ -280,7 +279,7 @@ class TrainSeeds(StrictModel):
     environment_count: Annotated[int, Field(ge=1)]
 
     @model_validator(mode="after")
-    def validate_training_pool(self) -> "TrainSeeds":
+    def validate_training_pool(self) -> TrainSeeds:
         last_seed = self.environment_start + self.environment_count - 1
         if last_seed > 9_999:
             raise ValueError("training environment seeds must be within 0..9999")
@@ -315,7 +314,7 @@ class MiniGridEvaluationProtocol(StrictModel):
     summary_path: str
 
     @model_validator(mode="after")
-    def validate_delay_sweep(self) -> "MiniGridEvaluationProtocol":
+    def validate_delay_sweep(self) -> MiniGridEvaluationProtocol:
         if self.delay_conditions != [32, 64, 96, 128]:
             raise ValueError("MiniGrid evaluation delays must be [32, 64, 96, 128]")
         if self.seeds.action_rng_repeats != 3:
@@ -345,7 +344,7 @@ class TrainConfig(StrictModel):
     drive: DriveConfig
 
     @model_validator(mode="after")
-    def validate_experimental_contract(self) -> "TrainConfig":
+    def validate_experimental_contract(self) -> TrainConfig:
         if self.environment.command_count != 40:
             raise ValueError("training command_count must be 40")
         if self.environment.explosion_delay != 5:
@@ -411,7 +410,7 @@ class MiniGridTrainConfig(StrictModel):
     evaluation: MiniGridEvaluationProtocol
 
     @model_validator(mode="after")
-    def validate_experimental_contract(self) -> "MiniGridTrainConfig":
+    def validate_experimental_contract(self) -> MiniGridTrainConfig:
         if self.provenance.checkpoint_path != "models/minigrid.nn":
             raise ValueError("MiniGrid must start from models/minigrid.nn")
         if self.provenance.checkpoint_sha256 != (
@@ -460,7 +459,7 @@ class EvaluationProtocol(StrictModel):
     output_path: str
 
     @model_validator(mode="after")
-    def validate_primary_protocol(self) -> "EvaluationProtocol":
+    def validate_primary_protocol(self) -> EvaluationProtocol:
         if self.command_counts != PRIMARY_COMMAND_COUNTS:
             raise ValueError(
                 "primary evaluation command_counts must be [10, 20, 30, 40, 50, 60, 80]"
@@ -487,7 +486,7 @@ class BaselineGateConfig(StrictModel):
     output_path: str
 
     @model_validator(mode="after")
-    def validate_repeats(self) -> "BaselineGateConfig":
+    def validate_repeats(self) -> BaselineGateConfig:
         if self.seeds.action_rng_repeats != 2:
             raise ValueError("pretrained baseline requires two paired action-RNG repeats")
         return self
@@ -505,7 +504,7 @@ class PretrainedEvalConfig(StrictModel):
     evaluation: BaselineGateConfig
 
     @model_validator(mode="after")
-    def validate_untouched_baseline(self) -> "PretrainedEvalConfig":
+    def validate_untouched_baseline(self) -> PretrainedEvalConfig:
         if self.lora.enabled:
             raise ValueError("pretrained baseline must not attach LoRA")
         if self.environment.command_count != 10:

@@ -1,8 +1,7 @@
 import torch
 
 from episodic_moba_ppo.episodic_memory import EpisodeTrace
-from transformer import MultiHeadAttention
-from transformer import Transformer
+from transformer import MultiHeadAttention, Transformer
 
 
 def _legacy_attention(module, values, keys, queries, mask):

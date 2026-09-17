@@ -1,13 +1,16 @@
+import os
+
 import gymnasium as gym
 import numpy as np
-import memory_gym
-import os
+
 os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "hide"
 
 from random import randint
+
 from gymnasium import spaces
 
-class MemoryGymWrapper():
+
+class MemoryGymWrapper:
     """
     This class wraps memory-gym environments.
     https://github.com/MarcoMeter/drl-memory-gym

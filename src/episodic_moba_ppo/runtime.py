@@ -7,11 +7,12 @@ import math
 import platform
 import random
 import subprocess
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from importlib import metadata as package_metadata
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import numpy as np
 import torch
@@ -234,7 +235,7 @@ def resume_discontinuity(completed_update: int) -> dict[str, Any]:
     return asdict(
         ResumeDiscontinuity(
             resumed_update=int(completed_update),
-            timestamp_utc=datetime.now(timezone.utc).isoformat(),
+            timestamp_utc=datetime.now(UTC).isoformat(),
         )
     )
 

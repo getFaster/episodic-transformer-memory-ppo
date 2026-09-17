@@ -49,7 +49,7 @@ def load_legacy_checkpoint(
 
     verify_file_hash(path, expected_sha256)
     with open(path, "rb") as stream:
-        loaded = pickle.load(stream)  # noqa: S301 - hash-pinned upstream artifact
+        loaded = pickle.load(stream)
     if not isinstance(loaded, tuple) or len(loaded) != 2:
         raise CheckpointIntegrityError(
             "legacy checkpoint is not a (state_dict, config) tuple"

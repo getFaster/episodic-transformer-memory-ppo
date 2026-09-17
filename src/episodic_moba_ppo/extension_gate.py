@@ -40,9 +40,10 @@ from __future__ import annotations
 import json
 import math
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from statistics import median
-from typing import Any, Mapping
+from typing import Any
 
 
 class ExtensionGateError(RuntimeError):
