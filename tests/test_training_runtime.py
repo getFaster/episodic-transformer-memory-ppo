@@ -8,7 +8,8 @@ from torch.distributions import Categorical
 
 from episodic_moba_ppo.checkpoint import MARKER_NAME, CheckpointStore
 from episodic_moba_ppo.moba_retrieval import MobaSelection
-from episodic_moba_ppo.training import TrainingRuntime
+from episodic_moba_ppo.ppo import MuonWithAdamWHeads
+from episodic_moba_ppo.training import LinearUpdateScheduler, TrainingRuntime
 
 
 class TinyEnv:
@@ -70,6 +71,28 @@ class CountingSGD(torch.optim.SGD):
     def step(self, closure=None):
         self.step_calls += 1
         return super().step(closure)
+
+
+def test_heterogeneous_optimizer_groups_keep_independent_lr_schedules() -> None:
+    muon_parameter = torch.nn.Parameter(torch.zeros(1, 1))
+    head_parameter = torch.nn.Parameter(torch.zeros(1))
+    optimizer = MuonWithAdamWHeads(
+        torch.optim.SGD([muon_parameter], lr=0.02),
+        torch.optim.AdamW([head_parameter], lr=0.0001),
+    )
+    scheduler = LinearUpdateScheduler(
+        optimizer,
+        SimpleNamespace(
+            muon=SimpleNamespace(initial_lr=0.02, final_lr=0.00067),
+            adamw_heads=SimpleNamespace(initial_lr=0.0001, final_lr=0.00000335),
+        ),
+    )
+
+    assert scheduler.step_to(0) == pytest.approx((0.02, 0.0001))
+    assert scheduler.step_to(61) == pytest.approx((0.00067, 0.00000335))
+    assert [group["lr"] for group in optimizer.param_groups] == pytest.approx(
+        (0.00067, 0.00000335)
+    )
 
 
 class DiagnosticTinyModel(TinyLongHistoryModel):

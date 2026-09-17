@@ -509,7 +509,8 @@ def build_training_runtime(
         model.to(device)
         optimizer = create_muon_optimizer(
             list(model.named_parameters()),
-            lr=config.optimizer.initial_lr,
+            muon_lr=config.optimizer.muon.initial_lr,
+            adamw_heads_lr=config.optimizer.adamw_heads.initial_lr,
             momentum=config.optimizer.momentum,
             nesterov=config.optimizer.nesterov,
             ns_steps=config.optimizer.ns_steps,

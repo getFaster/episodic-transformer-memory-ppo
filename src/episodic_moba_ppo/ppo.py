@@ -195,7 +195,8 @@ def create_muon_optimizer(
     named_parameters: Mapping[str, torch.nn.Parameter]
     | Sequence[tuple[str, torch.nn.Parameter]],
     *,
-    lr: float = 0.02,
+    muon_lr: float = 0.02,
+    adamw_heads_lr: float = 0.0001,
     momentum: float = 0.95,
     nesterov: bool = True,
     ns_steps: int = 5,
@@ -255,7 +256,7 @@ def create_muon_optimizer(
         )
     muon = torch.optim.Muon(
         [parameter for _, parameter in lora_parameters],
-        lr=lr,
+        lr=muon_lr,
         momentum=momentum,
         nesterov=nesterov,
         ns_steps=ns_steps,
@@ -266,7 +267,7 @@ def create_muon_optimizer(
         return muon
     heads = torch.optim.AdamW(
         [parameter for _, parameter in head_parameters],
-        lr=lr,
+        lr=adamw_heads_lr,
         weight_decay=weight_decay,
     )
     return MuonWithAdamWHeads(muon, heads)

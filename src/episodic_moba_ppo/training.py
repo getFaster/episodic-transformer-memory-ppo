@@ -52,18 +52,48 @@ class TrainingSeedAllocator:
 
 
 class LinearUpdateScheduler:
-    """Set a single LR for every optimizer step in one PPO update."""
+    """Apply the configured linear schedule independently to each optimizer family."""
 
-    def __init__(self, optimizer: torch.optim.Optimizer) -> None:
+    def __init__(
+        self, optimizer: torch.optim.Optimizer, optimizer_config: Any = None
+    ) -> None:
         self.optimizer = optimizer
+        self._schedules = self._resolve_schedules(optimizer_config)
         self.update = 0
 
-    def step_to(self, update: int) -> float:
+    def _resolve_schedules(
+        self, optimizer_config: Any
+    ) -> tuple[tuple[float, float], ...]:
+        """Return one (initial, final) pair per exposed optimizer param group."""
+
+        muon = getattr(optimizer_config, "muon", None)
+        heads = getattr(optimizer_config, "adamw_heads", None)
+        if muon is None or heads is None:
+            # Generic optimizers used by lightweight runtime tests keep their
+            # configured LR; heterogeneous Muon runs must supply both groups.
+            return tuple(
+                (float(group["lr"]), float(group["lr"]))
+                for group in self.optimizer.param_groups
+            )
+        schedules = [
+            (float(muon.initial_lr), float(muon.final_lr)),
+            (float(heads.initial_lr), float(heads.final_lr)),
+        ]
+        if len(self.optimizer.param_groups) != len(schedules):
+            raise ValueError(
+                "Muon scheduler requires exactly one Muon and one AdamW-head group"
+            )
+        return tuple(schedules)
+
+    def step_to(self, update: int) -> tuple[float, ...]:
         self.update = int(update)
-        lr = linear_learning_rate(self.update)
-        for group in self.optimizer.param_groups:
+        lrs = tuple(
+            linear_learning_rate(self.update, initial=initial, final=final)
+            for initial, final in self._schedules
+        )
+        for group, lr in zip(self.optimizer.param_groups, lrs, strict=True):
             group["lr"] = lr
-        return lr
+        return lrs
 
     def state_dict(self) -> dict[str, int]:
         return {"update": self.update}
@@ -151,7 +181,9 @@ class TrainingRuntime:
         self.traces = TraceRegistry(
             config.transformer.num_blocks, config.transformer.embed_dim
         )
-        self.scheduler = LinearUpdateScheduler(optimizer)
+        self.scheduler = LinearUpdateScheduler(
+            optimizer, getattr(config, "optimizer", None)
+        )
         self.completed_update = 0
         self.global_step = 0
         self._stop_requested = False

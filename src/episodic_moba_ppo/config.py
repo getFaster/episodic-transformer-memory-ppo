@@ -216,10 +216,20 @@ class PPOConfig(StrictModel):
         return self
 
 
-class MuonConfig(StrictModel):
-    name: Literal["muon"]
+class MuonScheduleConfig(StrictModel):
     initial_lr: Literal[0.02]
     final_lr: Literal[0.00067]
+
+
+class AdamWHeadsScheduleConfig(StrictModel):
+    initial_lr: Literal[0.0001]
+    final_lr: Literal[0.00000335]
+
+
+class MuonConfig(StrictModel):
+    name: Literal["muon"]
+    muon: MuonScheduleConfig
+    adamw_heads: AdamWHeadsScheduleConfig
     momentum: Literal[0.95]
     nesterov: Literal[True]
     ns_steps: Literal[5]
