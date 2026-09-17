@@ -266,7 +266,6 @@ class WandbConfig(StrictModel):
     entity: str | None
     project: str
     run_name: str
-    run_id: str | None
     mode: Literal["online", "offline", "disabled"]
 
 

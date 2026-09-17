@@ -432,6 +432,7 @@ def build_training_runtime(
     *,
     repo_root: str | Path = ".",
     progress_path: str | Path | None = None,
+    wandb_run_id: str | None = None,
 ):
     """Build the production 32-environment runtime after required checks pass."""
 
@@ -522,7 +523,7 @@ def build_training_runtime(
                 entity=config.wandb.entity,
                 project=config.wandb.project,
                 name=config.wandb.run_name,
-                run_id=config.wandb.run_id,
+                run_id=wandb_run_id,
                 mode=config.wandb.mode,
                 config=config.model_dump(mode="json"),
             )

@@ -97,7 +97,6 @@ wandb:
   project: episodic-moba-ppo
   group: minigrid-delay-sweep
   run_name: minigrid-delay-trxl-seed1
-  run_id: null
   mode: online
 drive:
   enabled: true

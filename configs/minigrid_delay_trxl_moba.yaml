@@ -96,8 +96,7 @@ wandb:
   entity: REPLACE_ME
   project: episodic-moba-ppo
   group: minigrid-delay-sweep
-  run_name: minigrid-delay-trxl-moba-seed1
-  run_id: null
+  run_name: minigrid-delay-trxl-moba
   mode: online
 drive:
   enabled: true

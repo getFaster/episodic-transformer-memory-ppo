@@ -172,8 +172,6 @@ with Path(base_config).open(encoding="utf-8") as stream:
 
 config["seeds"]["model"] = int(seed_text)
 config["wandb"]["entity"] = wandb_entity or None
-config["wandb"]["run_name"] = run_id
-config["wandb"]["run_id"] = run_id
 config["drive"]["root"] = drive_root
 config["checkpointing"]["local_dir"] = str(Path(work_root) / "checkpoints" / run_id)
 config["checkpointing"]["drive_dir"] = f"checkpoints/{run_id}"

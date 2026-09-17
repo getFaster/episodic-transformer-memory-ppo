@@ -5,9 +5,9 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
+from episodic_moba_ppo.commands.train import resolve_wandb_run_id
 from episodic_moba_ppo.config import PretrainedEvalConfig, TrainConfig, load_config
 from episodic_moba_ppo.logging import WandbLogger
-
 
 ROOT = Path(__file__).parents[1]
 
@@ -112,6 +112,40 @@ def test_wandb_entity_is_optional() -> None:
     raw["wandb"]["entity"] = None
     config = TrainConfig.model_validate(raw)
     assert config.wandb.entity is None
+
+
+def test_resolve_wandb_run_id_reuses_resumable_run_or_generates_id(monkeypatch) -> None:
+    import sys
+    import types
+
+    class Run:
+        def __init__(self, name, state, run_id):
+            self.name = name
+            self.state = state
+            self.id = run_id
+
+    class Api:
+        def __init__(self):
+            self.paths = []
+
+        def runs(self, *, path):
+            self.paths.append(path)
+            return [
+                Run("demo1", "finished", "finished-id"),
+                Run("demo1", "crashed", "resume-id"),
+            ]
+
+    api = Api()
+    wandb = types.SimpleNamespace(
+        Api=lambda: api,
+    )
+    monkeypatch.setitem(sys.modules, "wandb", wandb)
+
+    assert resolve_wandb_run_id(entity="team", project="proj", run_name="demo1") == (
+        "resume-id"
+    )
+    assert resolve_wandb_run_id(entity="team", project="proj", run_name="other") is None
+    assert api.paths == ["team/proj", "team/proj"]
 
 
 def test_wandb_logger_omits_empty_entity(monkeypatch) -> None:

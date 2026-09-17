@@ -11,6 +11,22 @@ from episodic_moba_ppo.runtime import build_training_runtime
 from episodic_moba_ppo.training import TrainingInterrupted
 
 
+def resolve_wandb_run_id(
+    *, entity: str | None, project: str, run_name: str
+) -> str | None:
+    import wandb
+
+    path = f"{entity}/{project}" if entity else project
+    resumable_states = {"running", "crashed", "failed", "killed"}
+    runs = wandb.Api().runs(path=path)
+    resumable_runs = [
+        run for run in runs if run.name == run_name and run.state in resumable_states
+    ]
+    if resumable_runs:
+        return resumable_runs[0].id
+    return None
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
@@ -42,12 +58,26 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--env minigrid requires task: train-minigrid")
     if args.env == "mortar" and not isinstance(config, TrainConfig):
         raise ValueError("--env mortar requires task: train")
+    run_name = f"{config.wandb.run_name}{config.seeds.model}"
+    run_id = None
+    if config.wandb.enabled and config.wandb.mode == "online":
+        run_id = resolve_wandb_run_id(
+            entity=config.wandb.entity,
+            project=config.wandb.project,
+            run_name=run_name,
+        )
+    config = config.model_copy(
+        update={
+            "wandb": config.wandb.model_copy(update={"run_name": run_name}),
+        }
+    )
     gate = args.baseline_reference if isinstance(config, TrainConfig) else None
     runtime = build_training_runtime(
         config,
         gate,
         repo_root=repo_root,
         progress_path=args.progress_path,
+        wandb_run_id=run_id,
     )
     try:
         runtime.run()
